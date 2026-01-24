@@ -83,12 +83,6 @@ Example::
 
 Note: It is safe to reuse a global `FileTraceStorageHandler` instance across runs.
 
-### HTTP Server
-
-Built-in FastAPI server for trace loading and LLM playground:
-
-    python -m tinytasktree --httpserver --host 127.0.0.1 --port 8000 --trace-dir .traces
-
 ### UI Server
 
 Trace UI (React/Vite) runs separately and proxies to the HTTP server:
