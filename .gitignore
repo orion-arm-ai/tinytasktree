@@ -1,0 +1,11 @@
+*.pyc
+.venv
+.env
+.ruff_cache
+.traces
+ui/.vite
+node_modules
+test.py
+__pycache__
+tinytasktree.egg-info/
+uv.lock
