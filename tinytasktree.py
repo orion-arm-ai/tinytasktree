@@ -89,6 +89,17 @@ Built-in FastAPI server for trace loading and LLM playground:
 
     python -m tinytasktree --httpserver --host 127.0.0.1 --port 8000 --trace-dir .traces
 
+### UI Server
+
+Trace UI (React/Vite) runs separately and proxies to the HTTP server:
+
+    # 1) start backend
+    python -m tinytasktree --httpserver --host 127.0.0.1 --port 8000 --trace-dir .traces
+    # 2) start UI dev server
+    cd ui && npm run dev
+    # 3) open the UI
+    http://127.0.0.1:5173
+
 ### Others
 
 Able to extend builder functions.
