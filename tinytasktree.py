@@ -2,7 +2,7 @@
 tinytasktree
 ============
 
-Async task orchestrator for Python, inspired by Behavior Trees.
+Async task orchestrator library for Python, inspired by Behavior Trees.
 
 Example::
 
@@ -335,6 +335,47 @@ class TraceNode:
     def total_cost(self) -> float:
         return self.cost + sum([ch.total_cost() for ch in self.children.values()])
 
+    def _node_tokens(self) -> dict[str, int] | None:
+        tokens_value = self.attributes.get("tokens")
+        tokens: dict[str, int] = {}
+
+        if isinstance(tokens_value, dict):
+            prompt = _as_int(tokens_value.get("prompt"))
+            completion = _as_int(tokens_value.get("completion"))
+            total = _as_int(tokens_value.get("total"))
+            if total is None and prompt is not None and completion is not None:
+                total = prompt + completion
+            _merge_token_fields(tokens, prompt, completion, total)
+        elif isinstance(tokens_value, str) and tokens_value:
+            try:
+                parsed = orjson.loads(tokens_value)
+                if isinstance(parsed, dict):
+                    prompt = _as_int(parsed.get("prompt"))
+                    completion = _as_int(parsed.get("completion"))
+                    total = _as_int(parsed.get("total"))
+                    if total is None and prompt is not None and completion is not None:
+                        total = prompt + completion
+                    _merge_token_fields(tokens, prompt, completion, total)
+            except Exception:
+                pass
+
+        if not tokens:
+            prompt = _as_int(self.attributes.get("prompt_tokens") or self.attributes.get("prompt"))
+            completion = _as_int(self.attributes.get("completion_tokens") or self.attributes.get("completion"))
+            total = _as_int(self.attributes.get("total_tokens") or self.attributes.get("total"))
+            if total is None and prompt is not None and completion is not None:
+                total = prompt + completion
+            _merge_token_fields(tokens, prompt, completion, total)
+
+        return tokens or None
+
+    def total_tokens(self) -> dict[str, int]:
+        total: dict[str, int] = {}
+        _add_token_totals(total, self._node_tokens())
+        for child in self.children.values():
+            _add_token_totals(total, child.total_tokens())
+        return total
+
 
 @dataclass
 class TraceRoot(TraceNode):
@@ -342,11 +383,14 @@ class TraceRoot(TraceNode):
 
     def json(self) -> JSON:
         d = super().json()
+        total_tokens = self.total_tokens()
         d.update(
             {
                 "total_cost": self.total_cost(),
             }
         )
+        if total_tokens:
+            d["total_tokens"] = total_tokens
         return d
 
 
@@ -1059,6 +1103,50 @@ type LLMStreamOnChunkCallback[B] = (
 class LLMNode[B](LeafNode[B]):
     KIND: str = "LLM"
 
+    @staticmethod
+    def _extract_tokens(usage: Any | None) -> dict[str, int] | None:
+        if not isinstance(usage, dict):
+            return None
+
+        prompt = _as_int(usage.get("prompt_tokens"))
+        completion = _as_int(usage.get("completion_tokens"))
+        total = _as_int(usage.get("total_tokens"))
+        if total is None and prompt is not None and completion is not None:
+            total = prompt + completion
+
+        tokens: dict[str, int] = {}
+        if prompt is not None:
+            tokens["prompt"] = prompt
+        if completion is not None:
+            tokens["completion"] = completion
+        if total is not None:
+            tokens["total"] = total
+        return tokens or None
+
+    @staticmethod
+    def _compute_tokens(model_name: str, messages_obj: Any, output_text: str) -> dict[str, int] | None:
+        try:
+            prompt_tokens = litellm.token_counter(model=model_name, messages=messages_obj)
+        except Exception:
+            prompt_tokens = None
+        try:
+            completion_tokens = litellm.token_counter(model=model_name, text=output_text, count_response_tokens=True)
+        except Exception:
+            completion_tokens = None
+        if prompt_tokens is None and completion_tokens is None:
+            return None
+        total_tokens = None
+        if prompt_tokens is not None and completion_tokens is not None:
+            total_tokens = prompt_tokens + completion_tokens
+        tokens: dict[str, int] = {}
+        if prompt_tokens is not None:
+            tokens["prompt"] = int(prompt_tokens)
+        if completion_tokens is not None:
+            tokens["completion"] = int(completion_tokens)
+        if total_tokens is not None:
+            tokens["total"] = int(total_tokens)
+        return tokens or None
+
     def __init__(
         self,
         model: str | LLMModelFactory[B],
@@ -1155,6 +1243,7 @@ class LLMNode[B](LeafNode[B]):
         stream = self._stream(b) if callable(self._stream) else self._stream
         api_key = self._api_key(b) if callable(self._api_key) else self._api_key
         output = ""
+        last_tokens: dict[str, int] | None = None
 
         tracer.update_attributes(model=model)
         tracer.update_attributes(messages=messages)
@@ -1176,6 +1265,9 @@ class LLMNode[B](LeafNode[B]):
                 cost_reported = self._try_record_cost(
                     tracer=tracer, model=model, usage=chunk.get("usage"), cost_reported=cost_reported
                 )
+                tokens = self._extract_tokens(chunk.get("usage"))
+                if tokens is not None:
+                    last_tokens = tokens
                 if choices:
                     delta = choices[0]["delta"]
                     delta_content = delta.get("content") or ""
@@ -1191,9 +1283,20 @@ class LLMNode[B](LeafNode[B]):
             cost_reported = self._try_record_cost(
                 tracer=tracer, model=model, response=response, usage=response.get("usage"), cost_reported=cost_reported
             )
+            last_tokens = self._extract_tokens(response.get("usage"))
 
         tracer.update_attributes(output=output)
         tracer.update_attributes(finish_reason=finish_reason)
+        if last_tokens is None:
+            last_tokens = self._compute_tokens(model, messages, output)
+        if last_tokens is not None:
+            tracer.update_attributes(tokens=last_tokens)
+            if "prompt" in last_tokens:
+                tracer.update_attributes(prompt_tokens=last_tokens["prompt"])
+            if "completion" in last_tokens:
+                tracer.update_attributes(completion_tokens=last_tokens["completion"])
+            if "total" in last_tokens:
+                tracer.update_attributes(total_tokens=last_tokens["total"])
 
         return Result.OK(output)
 
@@ -2824,6 +2927,32 @@ def _try_to_string(data: Any) -> str:
         except Exception:
             return str(data)
     return str(data)
+
+
+def _as_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        num = int(value)
+    except Exception:
+        return None
+    return num
+
+
+def _merge_token_fields(target: dict[str, int], prompt: int | None, completion: int | None, total: int | None) -> None:
+    if prompt is not None:
+        target["prompt"] = prompt
+    if completion is not None:
+        target["completion"] = completion
+    if total is not None:
+        target["total"] = total
+
+
+def _add_token_totals(total: dict[str, int], tokens: dict[str, int] | None) -> None:
+    if not tokens:
+        return
+    for key, value in tokens.items():
+        total[key] = total.get(key, 0) + int(value)
 
 
 def _normalized_func_name(func: Callable) -> str:

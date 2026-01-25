@@ -51,6 +51,7 @@ type TraceNodeJson = {
     result: string | null;
     attributes: Record<string, string>;
     children: Record<string, TraceNodeJson>;
+    total_tokens?: TokenUsage;
 };
 
 type FlattenedNode = {
@@ -72,6 +73,12 @@ type TraceNodeData = {
     subtreeColored: boolean;
     isFolded: boolean;
     isSelected?: boolean;
+};
+
+type TokenUsage = {
+    prompt?: number;
+    completion?: number;
+    total?: number;
 };
 
 const SUBTREE_COLORS = [
@@ -128,6 +135,68 @@ function parseStatus(resultStr: unknown): TraceStatus {
     if (resultStr.includes("OK(")) return "OK";
     if (resultStr.includes("FAIL(")) return "FAIL";
     return "UNKNOWN";
+}
+
+function parseTokenUsage(raw: unknown): TokenUsage | null {
+    if (raw == null) return null;
+    const normalized = () => {
+        if (typeof raw === "string") {
+            const trimmed = raw.trim();
+            if (!trimmed || trimmed === "None") return null;
+            try {
+                return JSON.parse(trimmed) as unknown;
+            } catch {
+                return null;
+            }
+        }
+        return raw;
+    };
+    const value = normalized();
+    if (!value || typeof value !== "object") return null;
+    const obj = value as Record<string, unknown>;
+    const toNum = (v: unknown): number | null => {
+        if (v == null) return null;
+        const num = Number(v);
+        return Number.isFinite(num) ? Math.round(num) : null;
+    };
+    const prompt = toNum(obj.prompt ?? obj.prompt_tokens);
+    const completion = toNum(obj.completion ?? obj.completion_tokens);
+    const computedTotal = (prompt ?? 0) + (completion ?? 0);
+    const total = toNum(obj.total ?? obj.total_tokens ?? computedTotal);
+    if (prompt == null && completion == null && total == null) return null;
+    return { prompt: prompt ?? undefined, completion: completion ?? undefined, total: total ?? undefined };
+}
+
+function formatTokenUsage(usage: TokenUsage | null): string {
+    if (!usage) return "";
+    const total = usage.total ?? (usage.prompt ?? 0) + (usage.completion ?? 0);
+    if (usage.prompt != null || usage.completion != null) {
+        const prompt = usage.prompt ?? 0;
+        const completion = usage.completion ?? 0;
+        return `Tokens: ${total} (${prompt}p/${completion}c)`;
+    }
+    if (usage.total != null) return `Tokens: ${usage.total}`;
+    return "";
+}
+
+function tokenUsageFromAttributes(attrs: Record<string, string> | null | undefined): TokenUsage | null {
+    if (!attrs) return null;
+    const fromTokens = parseTokenUsage(attrs.tokens);
+    if (fromTokens) return fromTokens;
+    const toNum = (value: unknown): number | null => {
+        if (value == null) return null;
+        const num = Number(value);
+        return Number.isFinite(num) ? Math.round(num) : null;
+    };
+    const prompt = toNum(attrs.prompt_tokens ?? attrs.prompt);
+    const completion = toNum(attrs.completion_tokens ?? attrs.completion);
+    const total = toNum(attrs.total_tokens ?? attrs.total);
+    if (prompt == null && completion == null && total == null) return null;
+    return {
+        prompt: prompt ?? undefined,
+        completion: completion ?? undefined,
+        total: total ?? undefined,
+    };
 }
 
 function parseDate(value: string): number {
@@ -319,6 +388,8 @@ function TraceCard(props: NodeProps<TraceNodeData>) {
             ? hexToRgba(data.subtreeColor, 0.14)
             : "#ffffff";
     const foldedPrefix = data.isFolded ? "▸ " : "";
+    const tokenUsage = data.node.kind === "LLM" ? tokenUsageFromAttributes(data.node.attributes) : null;
+    const tokenLine = formatTokenUsage(tokenUsage);
 
     return (
         <div
@@ -341,6 +412,7 @@ function TraceCard(props: NodeProps<TraceNodeData>) {
             </Tag>
             <div className="trace-card-meta">Duration: {data.durationMs.toFixed(2)} ms</div>
             <div className="trace-card-meta">Cost: {formatCost(data.cost)}</div>
+            {tokenLine && <div className="trace-card-meta">{tokenLine}</div>}
         </div>
     );
 }
@@ -402,6 +474,7 @@ function TraceUI() {
     const [searchOpen, setSearchOpen] = useState(false);
     const ignoreSearchChange = useRef(false);
     const [flowInstance, setFlowInstance] = useState<any>(null);
+    const fitTimer = useRef<number | null>(null);
     const [subtreeColorOn, setSubtreeColorOn] = useState(true);
     const maxDepth: number | null = null;
     const [autoFoldOn, setAutoFoldOn] = useState(true);
@@ -580,6 +653,21 @@ function TraceUI() {
         if (!selectedTrace?.result) return "";
         return extractResultData(selectedTrace.result);
     }, [selectedTrace]);
+
+    useEffect(() => {
+        if (!flowInstance || nodes.length === 0) return;
+        if (fitTimer.current) {
+            window.clearTimeout(fitTimer.current);
+        }
+        fitTimer.current = window.setTimeout(() => {
+            flowInstance.fitView({ padding: 0.2, duration: 300 });
+        }, 50);
+        return () => {
+            if (fitTimer.current) {
+                window.clearTimeout(fitTimer.current);
+            }
+        };
+    }, [flowInstance, nodes.length, activeFoldIds]);
 
     useEffect(() => {
         if (!selectedTrace) return;
@@ -817,6 +905,8 @@ function TraceUI() {
 
     const detailsItems = useMemo(() => {
         if (!selectedTrace) return [];
+        const tokenUsage = selectedTrace.kind === "LLM" ? tokenUsageFromAttributes(selectedTrace.attributes) : null;
+        const tokenLine = formatTokenUsage(tokenUsage);
         const items = [
             {
                 key: "start",
@@ -833,16 +923,25 @@ function TraceUI() {
                 label: "Duration",
                 children: `${selectedTrace.duration.toFixed(2)} ms`,
             },
-            {
-                key: "status",
-                label: "Status",
-                children: (
-                    <Tag color={statusColor(parseStatus(selectedTrace.result || null))}>
-                        {parseStatus(selectedTrace.result || null)}
-                    </Tag>
-                ),
-            },
         ];
+        if (tokenLine) {
+            items.push({
+                key: "tokens",
+                label: "Tokens",
+                children: tokenLine.replace("Tokens: ", ""),
+            });
+        }
+        if (selectedTrace.name === "ROOT") {
+            const rootTokens = selectedTrace.total_tokens || null;
+            const rootLine = formatTokenUsage(rootTokens);
+            if (rootLine) {
+                items.push({
+                    key: "total_tokens",
+                    label: "Total Tokens",
+                    children: rootLine.replace("Tokens: ", ""),
+                });
+            }
+        }
         if (selectedTrace.name === "ROOT") {
             items.push({
                 key: "total",
@@ -852,6 +951,7 @@ function TraceUI() {
         }
         return items;
     }, [selectedTrace, total]);
+
 
     const detailsTabs = useMemo(
         () => [
@@ -1110,14 +1210,37 @@ function TraceUI() {
                                             </Tag>
                                         </Space>
                                     </div>
-                                    <Text className="details-cost">Cost: {formatCost(selectedTrace.cost || 0)}</Text>
+                                    <div className="details-metrics">
+                                        <Text className="details-cost">
+                                            Cost: {formatCost(selectedTrace.cost || 0)}
+                                        </Text>
+                                        {(() => {
+                                            if (selectedTrace.kind !== "LLM") return null;
+                                            const usage = tokenUsageFromAttributes(selectedTrace.attributes);
+                                            const tokenLine = formatTokenUsage(usage);
+                                            return tokenLine ? (
+                                                <Text className="details-tokens">{tokenLine}</Text>
+                                            ) : null;
+                                        })()}
+                                    </div>
                                 </Space>
                                 <Descriptions
                                     className="details-grid"
                                     size="small"
-                                    column={{ xs: 1, sm: 2, md: 2, lg: 3 }}
+                                    layout="horizontal"
+                                    column={{ xs: 1, sm: 1, md: 1, lg: 1, xl: 1 }}
                                     items={detailsItems}
-                                />
+                                >
+                                    {detailsItems.map((item) => (
+                                        <Descriptions.Item
+                                            key={item.key}
+                                            label={item.label}
+                                            span={1}
+                                        >
+                                            <span className="details-inline">{item.children}</span>
+                                        </Descriptions.Item>
+                                    ))}
+                                </Descriptions>
                             </Card>
 
                             <Tabs
