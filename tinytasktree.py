@@ -587,6 +587,7 @@ class Node[B](ABC):
             tracer.error(e)
             result = Result.FAIL(None)
             tracer.set_end(result)
+            raise
         except Exception as e:
             exc = e
             tracer.error(e)
