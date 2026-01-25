@@ -593,6 +593,7 @@ class Node[B](ABC):
         tracer = context.current_tracer()
         tracer.set_kind(self.KIND)
         exc: BaseException | None = None
+        result: Result | None = None
         try:
             tracer.set_start()
             result = await self._impl(context, tracer)
@@ -604,6 +605,13 @@ class Node[B](ABC):
             tracer.set_end(result)
             if not swallow_cancel:
                 raise
+        except TasktreeProgrammingError as e:
+            exc = e
+            tracer.error(e)
+            result = Result.FAIL(None)
+            tracer.set_end(result)
+            # Programming errors should fail fast to surface incorrect usage.
+            raise
         except Exception as e:
             exc = e
             tracer.error(e)
@@ -611,6 +619,8 @@ class Node[B](ABC):
             tracer.set_end(result)
         finally:
             if context.enable_python_logging:
+                if result is None:
+                    result = Result.FAIL(None)
                 identifier = ""
                 if context.python_logging_indentifier_name:
                     identifier = " = ".join(
