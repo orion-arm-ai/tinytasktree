@@ -12,7 +12,27 @@ import ReactFlow, {
     ConnectionMode,
     BackgroundVariant,
 } from "reactflow";
+import {
+    Alert,
+    AutoComplete,
+    Button,
+    Card,
+    ConfigProvider,
+    Descriptions,
+    Input,
+    Layout,
+    Space,
+    Switch,
+    Table,
+    Tabs,
+    Tag,
+    Tooltip,
+    Typography,
+} from "antd";
 import "reactflow/dist/style.css";
+
+const { Header, Content } = Layout;
+const { Text, Title } = Typography;
 
 const X_SPACING = 420;
 const Y_SPACING = 190;
@@ -51,6 +71,7 @@ type TraceNodeData = {
     subtreeColor: string | null;
     subtreeColored: boolean;
     isFolded: boolean;
+    isSelected?: boolean;
 };
 
 const SUBTREE_COLORS = [
@@ -115,7 +136,7 @@ function parseDate(value: string): number {
 }
 
 function sortChildren(children: Record<string, TraceNodeJson>): TraceNodeJson[] {
-  return Object.values(children).sort((a, b) => parseDate(a.start_at) - parseDate(b.start_at));
+    return Object.values(children).sort((a, b) => parseDate(a.start_at) - parseDate(b.start_at));
 }
 
 function extractSystemUser(messages: unknown): { system: string; user: string } {
@@ -134,69 +155,69 @@ function extractSystemUser(messages: unknown): { system: string; user: string } 
             user = content;
         }
     }
-  return { system, user };
+    return { system, user };
 }
 
 function hasResultContent(raw: unknown): boolean {
-  if (raw == null) return false;
-  if (typeof raw === "object") {
-    const obj = raw as { data?: unknown };
-    if ("data" in obj) {
-      const data = obj.data;
-      if (data == null) return false;
-      if (typeof data === "string" && data.trim() === "None") return false;
-      return true;
-    }
-    return true;
-  }
-  if (typeof raw === "string") {
-    const trimmed = raw.trim();
-    if (!trimmed || trimmed === "None") return false;
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (parsed && typeof parsed === "object" && "data" in parsed) {
-        const data = (parsed as { data?: unknown }).data;
-        if (data == null) return false;
-        if (typeof data === "string" && data.trim() === "None") return false;
+    if (raw == null) return false;
+    if (typeof raw === "object") {
+        const obj = raw as { data?: unknown };
+        if ("data" in obj) {
+            const data = obj.data;
+            if (data == null) return false;
+            if (typeof data === "string" && data.trim() === "None") return false;
+            return true;
+        }
         return true;
-      }
-    } catch {
-      // ignore
+    }
+    if (typeof raw === "string") {
+        const trimmed = raw.trim();
+        if (!trimmed || trimmed === "None") return false;
+        try {
+            const parsed = JSON.parse(trimmed);
+            if (parsed && typeof parsed === "object" && "data" in parsed) {
+                const data = (parsed as { data?: unknown }).data;
+                if (data == null) return false;
+                if (typeof data === "string" && data.trim() === "None") return false;
+                return true;
+            }
+        } catch {
+            // ignore
+        }
+        return true;
     }
     return true;
-  }
-  return true;
 }
 
 function extractResultData(raw: unknown): string {
-  if (raw == null) return "";
-  if (typeof raw === "object") {
-    const obj = raw as { data?: unknown };
-    if ("data" in obj) {
-      const data = obj.data;
-      if (data == null) return "";
-      if (typeof data === "string") return data;
-      return JSON.stringify(data, null, 2);
+    if (raw == null) return "";
+    if (typeof raw === "object") {
+        const obj = raw as { data?: unknown };
+        if ("data" in obj) {
+            const data = obj.data;
+            if (data == null) return "";
+            if (typeof data === "string") return data;
+            return JSON.stringify(data, null, 2);
+        }
+        return JSON.stringify(raw, null, 2);
     }
-    return JSON.stringify(raw, null, 2);
-  }
-  if (typeof raw === "string") {
-    const trimmed = raw.trim();
-    if (!trimmed) return "";
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (parsed && typeof parsed === "object" && "data" in parsed) {
-        const data = (parsed as { data?: unknown }).data;
-        if (data == null) return "";
-        if (typeof data === "string") return data;
-        return JSON.stringify(data, null, 2);
-      }
-    } catch {
-      // ignore
+    if (typeof raw === "string") {
+        const trimmed = raw.trim();
+        if (!trimmed) return "";
+        try {
+            const parsed = JSON.parse(trimmed);
+            if (parsed && typeof parsed === "object" && "data" in parsed) {
+                const data = (parsed as { data?: unknown }).data;
+                if (data == null) return "";
+                if (typeof data === "string") return data;
+                return JSON.stringify(data, null, 2);
+            }
+        } catch {
+            // ignore
+        }
+        return trimmed;
     }
-    return trimmed;
-  }
-  return String(raw);
+    return String(raw);
 }
 
 function shouldFoldChildren(node: TraceNodeJson): boolean {
@@ -278,15 +299,21 @@ function formatCost(cost: number): string {
     return `$${cost.toFixed(6)}`;
 }
 
+function statusColor(status: TraceStatus): string {
+    if (status === "OK") return "green";
+    if (status === "FAIL") return "red";
+    return "default";
+}
+
 function TraceCard(props: NodeProps<TraceNodeData>) {
-  const { data, selected } = props;
-  const isSelected = data.isSelected || selected;
-  const status = data.status;
-  let borderColor = "#1f7a4a";
-  if (status === "FAIL") borderColor = "#d11f1f";
-  if (status === "UNKNOWN") borderColor = "#7b7b7b";
-  if (isSelected) borderColor = "#000000";
-  const borderWidth = isSelected ? 6 : status === "FAIL" ? 5 : 4;
+    const { data, selected } = props;
+    const isSelected = data.isSelected || selected;
+    const status = data.status;
+    let borderColor = "#1f7a4a";
+    if (status === "FAIL") borderColor = "#d11f1f";
+    if (status === "UNKNOWN") borderColor = "#7b7b7b";
+    if (isSelected) borderColor = "#000000";
+    const borderWidth = isSelected ? 6 : status === "FAIL" ? 5 : 4;
     const background =
         data.subtreeColored && data.subtreeColor && data.subtreeColor !== null
             ? hexToRgba(data.subtreeColor, 0.14)
@@ -305,10 +332,13 @@ function TraceCard(props: NodeProps<TraceNodeData>) {
         >
             <Handle type="target" position={Position.Left} className="trace-handle" />
             <Handle type="source" position={Position.Right} className="trace-handle" />
-            <div className="trace-card-title">{foldedPrefix}{data.node.name || "(unnamed)"}</div>
-            <div className={`status-pill ${status === "FAIL" ? "fail" : status === "OK" ? "ok" : "unknown"}`}>
-                {status}
+            <div className="trace-card-title">
+                {foldedPrefix}
+                {data.node.name || "(unnamed)"}
             </div>
+            <Tag color={statusColor(status)} className="trace-status">
+                {status}
+            </Tag>
             <div className="trace-card-meta">Duration: {data.durationMs.toFixed(2)} ms</div>
             <div className="trace-card-meta">Cost: {formatCost(data.cost)}</div>
         </div>
@@ -316,7 +346,6 @@ function TraceCard(props: NodeProps<TraceNodeData>) {
 }
 
 const nodeTypes = { traceNode: TraceCard };
-
 
 function useResizableSidebar(initialWidth: number) {
     const [width, setWidth] = useState(initialWidth);
@@ -371,6 +400,7 @@ function TraceUI() {
     const resizer = useResizableSidebar(initialLeftWidth);
     const [searchTerm, setSearchTerm] = useState("");
     const [searchOpen, setSearchOpen] = useState(false);
+    const ignoreSearchChange = useRef(false);
     const [flowInstance, setFlowInstance] = useState<any>(null);
     const [subtreeColorOn, setSubtreeColorOn] = useState(true);
     const maxDepth: number | null = null;
@@ -546,10 +576,10 @@ function TraceUI() {
 
     const selectedNode = selectedId ? nodeMap.get(selectedId) : null;
     const selectedTrace = selectedNode?.node || null;
-  const resultText = useMemo(() => {
-    if (!selectedTrace?.result) return "";
-    return extractResultData(selectedTrace.result);
-  }, [selectedTrace]);
+    const resultText = useMemo(() => {
+        if (!selectedTrace?.result) return "";
+        return extractResultData(selectedTrace.result);
+    }, [selectedTrace]);
 
     useEffect(() => {
         if (!selectedTrace) return;
@@ -688,7 +718,7 @@ function TraceUI() {
         const tokens = query
             .trim()
             .toLowerCase()
-            .split(/\\s+/)
+            .split(/\s+/)
             .filter(Boolean);
         if (!tokens.length) return text;
         const parts = text.split(new RegExp(`(${tokens.join("|")})`, "gi"));
@@ -719,38 +749,34 @@ function TraceUI() {
         return start > 0 ? `…${slice}` : slice;
     }, []);
 
-  const highlightContent = useCallback(
-    (text: string) => highlightText(text, searchTerm.trim()),
-    [highlightText, searchTerm]
-  );
+    const highlightContent = useCallback((text: string) => highlightText(text, searchTerm.trim()), [highlightText, searchTerm]);
 
-  const focusNodeById = useCallback(
-    (id: string) => {
-      if (!flowInstance) return;
-      const live = flowInstance.getNode(id);
-      if (live) {
-        const w = live.width ?? 200;
-        const h = live.height ?? 120;
-        const cx = live.position.x + w / 2;
-        const cy = live.position.y + h / 2;
-        flowInstance.setCenter(cx, cy, { zoom: 1.2, duration: 350 });
-        return;
-      }
-      const fallback = nodeMap.get(id);
-      if (fallback) {
-        flowInstance.setCenter(
-          fallback.depth * X_SPACING + 120,
-          fallback.order * Y_SPACING + 60,
-          { zoom: 1.2, duration: 350 }
-        );
-      }
-    },
-    [flowInstance, nodeMap]
-  );
+    const focusNodeById = useCallback(
+        (id: string) => {
+            if (!flowInstance) return;
+            const live = flowInstance.getNode(id);
+            if (live) {
+                const w = live.width ?? 200;
+                const h = live.height ?? 120;
+                const cx = live.position.x + w / 2;
+                const cy = live.position.y + h / 2;
+                flowInstance.setCenter(cx, cy, { zoom: 1.2, duration: 350 });
+                return;
+            }
+            const fallback = nodeMap.get(id);
+            if (fallback) {
+                flowInstance.setCenter(fallback.depth * X_SPACING + 120, fallback.order * Y_SPACING + 60, {
+                    zoom: 1.2,
+                    duration: 350,
+                });
+            }
+        },
+        [flowInstance, nodeMap]
+    );
 
-  const handleTogglePlayEditor = useCallback(() => {
-    if (playEditorMode === "split") {
-      const messages: any[] = [];
+    const handleTogglePlayEditor = useCallback(() => {
+        if (playEditorMode === "split") {
+            const messages: any[] = [];
             const sys = playSystem.trim();
             const usr = playUser.trim();
             if (sys) messages.push({ role: "system", content: sys });
@@ -770,70 +796,228 @@ function TraceUI() {
         }
     }, [playEditorMode, playMessages, playSystem, playUser]);
 
+    const searchOptions = useMemo(() => {
+        return searchResults.map((item) => {
+            const content = searchIndex.find((entry) => entry.id === item.id)?.text || "";
+            const snippet = buildSnippet(content, searchTerm, item.hits);
+            return {
+                value: item.name || "(unnamed)",
+                id: item.id,
+                label: (
+                    <div className="search-item">
+                        <div className="search-name">{highlightText(item.name, searchTerm)}</div>
+                        <div className="search-snippet">
+                            {snippet ? highlightText(snippet, searchTerm) : "-"}
+                        </div>
+                    </div>
+                ),
+            };
+        });
+    }, [searchResults, searchIndex, buildSnippet, highlightText, searchTerm]);
+
+    const detailsItems = useMemo(() => {
+        if (!selectedTrace) return [];
+        const items = [
+            {
+                key: "start",
+                label: "Start",
+                children: selectedTrace.start_at || "-",
+            },
+            {
+                key: "end",
+                label: "End",
+                children: selectedTrace.end_at || "-",
+            },
+            {
+                key: "duration",
+                label: "Duration",
+                children: `${selectedTrace.duration.toFixed(2)} ms`,
+            },
+            {
+                key: "status",
+                label: "Status",
+                children: (
+                    <Tag color={statusColor(parseStatus(selectedTrace.result || null))}>
+                        {parseStatus(selectedTrace.result || null)}
+                    </Tag>
+                ),
+            },
+        ];
+        if (selectedTrace.name === "ROOT") {
+            items.push({
+                key: "total",
+                label: "Total Cost",
+                children: formatCost(total),
+            });
+        }
+        return items;
+    }, [selectedTrace, total]);
+
+    const detailsTabs = useMemo(
+        () => [
+            {
+                key: "result",
+                label: hasResultContent(selectedTrace?.result) ? "Result.data+" : "Result.data",
+                children: (
+                    <Card
+                        size="small"
+                        className="panel-section"
+                        extra={
+                            <Button size="small" onClick={() => copyText(resultText)}>
+                                Copy
+                            </Button>
+                        }
+                    >
+                        <pre className="panel-content">{resultText ? highlightContent(resultText) : "(empty)"}</pre>
+                    </Card>
+                ),
+            },
+            {
+                key: "logs",
+                label: `Logs(${selectedTrace?.logs ? selectedTrace.logs.length : 0})`,
+                children: (
+                    <Card
+                        size="small"
+                        className="panel-section"
+                        extra={
+                            <Button size="small" onClick={() => copyText((selectedTrace?.logs || []).join("\n"))}>
+                                Copy
+                            </Button>
+                        }
+                    >
+                        <pre className="panel-content">
+                            {(selectedTrace?.logs || []).length
+                                ? highlightContent((selectedTrace?.logs || []).join("\n"))
+                                : "(empty)"}
+                        </pre>
+                    </Card>
+                ),
+            },
+            {
+                key: "attributes",
+                label: `Attrs(${selectedTrace?.attributes ? Object.keys(selectedTrace.attributes).length : 0})`,
+                children: (
+                    <Card
+                        size="small"
+                        className="panel-section"
+                        extra={
+                            <Button
+                                size="small"
+                                onClick={() =>
+                                    copyText(JSON.stringify(selectedTrace?.attributes || {}, null, 2))
+                                }
+                            >
+                                Copy
+                            </Button>
+                        }
+                    >
+                        <Table
+                            size="small"
+                            pagination={false}
+                            rowKey="key"
+                            dataSource={Object.entries(selectedTrace?.attributes || {}).map(
+                                ([key, value]) => ({ key, value })
+                            )}
+                            columns={[
+                                {
+                                    title: "Key",
+                                    dataIndex: "key",
+                                    key: "key",
+                                    width: "35%",
+                                    render: (text: string) => <Text code>{text}</Text>,
+                                },
+                                {
+                                    title: "Value",
+                                    dataIndex: "value",
+                                    key: "value",
+                                    render: (value: unknown) => {
+                                        const content =
+                                            typeof value === "string"
+                                                ? value
+                                                : JSON.stringify(value, null, 2);
+                                        return (
+                                            <pre className="panel-content" style={{ margin: 0 }}>
+                                                {content || "(empty)"}
+                                            </pre>
+                                        );
+                                    },
+                                },
+                            ]}
+                            locale={{ emptyText: "(empty)" }}
+                        />
+                    </Card>
+                ),
+            },
+        ],
+        [selectedTrace, resultText, highlightContent]
+    );
+
     return (
-        <div className="app-shell">
-            <header className="top-bar">
-                <div className="brand">tinytasktree Trace UI</div>
+        <Layout className="app-shell">
+            <Header className="top-bar">
+                <Space size={16} align="center" className="top-bar-left">
+                    <Title level={4} className="brand">
+                        tinytasktree Trace UI
+                    </Title>
+                </Space>
                 <div className="search-box">
-                    <input
-                        className="search-input"
-                        placeholder="Search nodes..."
+                    <AutoComplete
                         value={searchTerm}
-                        onChange={(e) => {
-                            setSearchTerm(e.target.value);
+                        options={searchOptions}
+                        open={searchOpen && searchResults.length > 0}
+                        onChange={(value) => {
+                            if (ignoreSearchChange.current) {
+                                ignoreSearchChange.current = false;
+                                return;
+                            }
+                            setSearchTerm(value);
                             setSearchOpen(true);
                         }}
-                        onFocus={() => setSearchOpen(true)}
-                        onBlur={() => setTimeout(() => setSearchOpen(false), 150)}
-                    />
-                    {searchOpen && searchResults.length > 0 && (
-                        <div className="search-dropdown">
-                            {searchResults.map((item) => {
-                                const content = searchIndex.find((entry) => entry.id === item.id)?.text || "";
-                                const snippet = buildSnippet(content, searchTerm, item.hits);
-                                return (
-                                    <button
-                                        key={item.id}
-                                        className="search-item"
-                                        onClick={() => {
-                                            setSelectedId(item.id);
-                                            requestAnimationFrame(() => focusNodeById(item.id));
-                                            setSearchOpen(false);
-                                        }}
-                                    >
-                                        <div className="search-name">{highlightText(item.name, searchTerm)}</div>
-                                        <div className="search-snippet">{snippet ? highlightText(snippet, searchTerm) : "-"}</div>
-                                    </button>
-                                );
-                            })}
-                        </div>
-                    )}
-                </div>
-                <div className="top-controls">
-                    <div className="toggle-stack">
-                        <label className="toggle top-toggle">
-                            <input
-                                type="checkbox"
-                                checked={autoFoldOn}
-                                onChange={(e) => setAutoFoldOn(e.target.checked)}
-                            />
-                            <span>Auto fold</span>
-                        </label>
-                        <div className="top-hint">Double-click a node to fold/unfold its subtree</div>
-                    </div>
-                    <label className="toggle top-toggle">
-                        <input
-                            type="checkbox"
-                            checked={subtreeColorOn}
-                            onChange={(e) => setSubtreeColorOn(e.target.checked)}
+                        onSelect={(value, option) => {
+                            const opt = option as { id?: string };
+                            const selectedId = opt?.id ?? value;
+                            ignoreSearchChange.current = true;
+                            setSearchTerm(value);
+                            setSelectedId(selectedId);
+                            requestAnimationFrame(() => focusNodeById(selectedId));
+                            setSearchOpen(false);
+                        }}
+                        className="search-input"
+                    >
+                        <Input
+                            size="large"
+                            placeholder="Search nodes..."
+                            onFocus={() => setSearchOpen(true)}
+                            onBlur={() => setTimeout(() => setSearchOpen(false), 150)}
                         />
-                        <span>Subtree color</span>
-                    </label>
+                    </AutoComplete>
                 </div>
-                {loadError && <div className="error-badge">{loadError}</div>}
-            </header>
+                <Space size={16} align="center" className="top-controls">
+                    <Space direction="vertical" size={4} className="toggle-stack">
+                        <Space align="center">
+                            <Switch checked={autoFoldOn} onChange={setAutoFoldOn} size="small" />
+                            <Text className="toggle-label">Auto fold</Text>
+                        </Space>
+                        <Text className="top-hint">Double-click a node to fold/unfold its subtree</Text>
+                    </Space>
+                    <Tooltip title="Color subtrees by top-level Tree nodes">
+                        <Space align="center">
+                            <Switch checked={subtreeColorOn} onChange={setSubtreeColorOn} size="small" />
+                            <Text className="toggle-label">Subtree color</Text>
+                        </Space>
+                    </Tooltip>
+                </Space>
+                {loadError && (
+                    <Alert
+                        type="error"
+                        message={loadError}
+                        showIcon
+                        className="error-badge"
+                    />
+                )}
+            </Header>
 
-            <div className="content">
+            <Content className="content">
                 <div className="left-panel" style={{ width: resizer.width }}>
                     {trace ? (
                         <ReactFlowProvider>
@@ -841,6 +1025,7 @@ function TraceUI() {
                                 nodes={nodes}
                                 edges={edges}
                                 nodeTypes={nodeTypes}
+                                style={{ width: "100%", height: "100%" }}
                                 onNodeClick={(_, node) => setSelectedId(node.id)}
                                 onNodeDoubleClick={(_, node) => {
                                     const target = nodeMap.get(node.id);
@@ -912,181 +1097,130 @@ function TraceUI() {
                         <div className="empty-state">Select a node to inspect details.</div>
                     ) : (
                         <div className="details">
-                            <div className="details-header">
-                                <div>
-                                    <div className="details-title">{selectedTrace.name || "(unnamed)"}</div>
-                                    <div className="details-sub">
-                                        <span className="type-label">{selectedTrace.kind || "Unknown"}</span>
-                                        <span
-                                            className={`status-pill ${parseStatus(selectedTrace.result || null) === "FAIL" ? "fail" : parseStatus(selectedTrace.result || null) === "OK" ? "ok" : "unknown"}`}
-                                        >
-                                            {parseStatus(selectedTrace.result || null)}
-                                        </span>
-                                    </div>
-                                </div>
-                                <div className="details-cost">
-                                    Cost: {formatCost(selectedTrace.cost || 0)}
-                                </div>
-                            </div>
-                            <div className="details-grid">
-                                <div>
-                                    <div className="label">Start</div>
-                                    <div className="value">{selectedTrace.start_at || "-"}</div>
-                                </div>
-                                <div>
-                                    <div className="label">End</div>
-                                    <div className="value">{selectedTrace.end_at || "-"}</div>
-                                </div>
-                                <div>
-                                    <div className="label">Duration</div>
-                                    <div className="value">{selectedTrace.duration.toFixed(2)} ms</div>
-                                </div>
-                                <div>
-                                    <div className="label">Status</div>
-                                    <div className="value">
-                                        <span
-                                            className={`status-pill ${parseStatus(selectedTrace.result || null) === "FAIL" ? "fail" : parseStatus(selectedTrace.result || null) === "OK" ? "ok" : "unknown"}`}
-                                        >
-                                            {parseStatus(selectedTrace.result || null)}
-                                        </span>
-                                    </div>
-                                </div>
-                                {selectedTrace.name === "ROOT" && (
+                            <Card className="details-header" bordered>
+                                <Space align="start" className="details-title-row">
                                     <div>
-                                        <div className="label">Total Cost</div>
-                                        <div className="value">{formatCost(total)}</div>
+                                        <Title level={4} className="details-title">
+                                            {selectedTrace.name || "(unnamed)"}
+                                        </Title>
+                                        <Space size={8} align="center" className="details-sub">
+                                            <Tag className="type-label">{selectedTrace.kind || "Unknown"}</Tag>
+                                            <Tag color={statusColor(parseStatus(selectedTrace.result || null))}>
+                                                {parseStatus(selectedTrace.result || null)}
+                                            </Tag>
+                                        </Space>
                                     </div>
-                                )}
-                            </div>
+                                    <Text className="details-cost">Cost: {formatCost(selectedTrace.cost || 0)}</Text>
+                                </Space>
+                                <Descriptions
+                                    className="details-grid"
+                                    size="small"
+                                    column={{ xs: 1, sm: 2, md: 2, lg: 3 }}
+                                    items={detailsItems}
+                                />
+                            </Card>
 
-              <div className="tabs">
-                <button className={tab === "result" ? "tab active" : "tab"} onClick={() => setTab("result")}>
-                  {hasResultContent(selectedTrace?.result) ? "Result.data+" : "Result.data"}
-                </button>
-                <button className={tab === "logs" ? "tab active" : "tab"} onClick={() => setTab("logs")}>
-                  Logs({selectedTrace?.logs ? selectedTrace.logs.length : 0})
-                </button>
-                <button
-                  className={tab === "attributes" ? "tab active" : "tab"}
-                  onClick={() => setTab("attributes")}
-                >
-                  Attrs({selectedTrace?.attributes ? Object.keys(selectedTrace.attributes).length : 0})
-                </button>
-              </div>
-
-                            {tab === "result" && (
-                                <div className="panel-section">
-                                    <div className="panel-actions">
-                                        <button className="btn ghost small" onClick={() => copyText(resultText)}>Copy</button>
-                                    </div>
-                                    <pre className="panel-content">{resultText ? highlightContent(resultText) : "(empty)"}</pre>
-                                </div>
-                            )}
-                            {tab === "logs" && (
-                                <div className="panel-section">
-                                    <div className="panel-actions">
-                                        <button className="btn ghost small" onClick={() => copyText((selectedTrace.logs || []).join("\n"))}>
-                                            Copy
-                                        </button>
-                                    </div>
-                                    <pre className="panel-content">
-                                        {(selectedTrace.logs || []).length
-                                            ? highlightContent((selectedTrace.logs || []).join("\n"))
-                                            : "(empty)"}
-                                    </pre>
-                                </div>
-                            )}
-                            {tab === "attributes" && (
-                                <div className="panel-section">
-                                    <div className="panel-actions">
-                                        <button
-                                            className="btn ghost small"
-                                            onClick={() => copyText(JSON.stringify(selectedTrace.attributes || {}, null, 2))}
-                                        >
-                                            Copy
-                                        </button>
-                                    </div>
-                                    <pre className="panel-content">
-                                        {selectedTrace.attributes && Object.keys(selectedTrace.attributes).length
-                                            ? highlightContent(JSON.stringify(selectedTrace.attributes || {}, null, 2))
-                                            : "(empty)"}
-                                    </pre>
-                                </div>
-                            )}
+                            <Tabs
+                                className="tabs"
+                                activeKey={tab}
+                                onChange={(key) => setTab(key as "result" | "logs" | "attributes")}
+                                items={detailsTabs}
+                            />
 
                             {selectedTrace.kind === "LLM" && (
-                                <div className="playground">
-                                    <div className="playground-header-row">
-                                        <div className="playground-header">LLM Playground</div>
-                                        <button className="btn ghost tiny" onClick={handleTogglePlayEditor}>
+                                <Card
+                                    className="playground"
+                                    title={<Text strong>LLM Playground</Text>}
+                                    extra={
+                                        <Button size="small" onClick={handleTogglePlayEditor}>
                                             {playEditorMode === "split" ? "JSON" : "Text"}
-                                        </button>
-                                    </div>
-                                    <label className="field">
-                                        <span>Model</span>
-                                        <input value={playModel} onChange={(e) => setPlayModel(e.target.value)} />
-                                    </label>
-                                    {playEditorMode === "split" ? (
-                                        <>
-                                            <label className="field">
-                                                <span>System</span>
-                                                <textarea
+                                        </Button>
+                                    }
+                                >
+                                    <Space direction="vertical" size={12} className="playground-fields">
+                                        <div>
+                                            <Text className="field-label">Model</Text>
+                                            <Input value={playModel} onChange={(e) => setPlayModel(e.target.value)} />
+                                        </div>
+                                        {playEditorMode === "split" ? (
+                                            <>
+                                                <div>
+                                                    <Text className="field-label">System</Text>
+                                                    <Input.TextArea
+                                                        className="playground-textarea"
+                                                        rows={8}
+                                                        value={playSystem}
+                                                        onChange={(e) => setPlaySystem(e.target.value)}
+                                                    />
+                                                </div>
+                                                <div>
+                                                    <Text className="field-label">User</Text>
+                                                    <Input.TextArea
+                                                        className="playground-textarea"
+                                                        rows={10}
+                                                        value={playUser}
+                                                        onChange={(e) => setPlayUser(e.target.value)}
+                                                    />
+                                                </div>
+                                            </>
+                                        ) : (
+                                            <div>
+                                                <Text className="field-label">Messages (JSON)</Text>
+                                                <Input.TextArea
                                                     className="playground-textarea"
-                                                    rows={8}
-                                                    value={playSystem}
-                                                    onChange={(e) => setPlaySystem(e.target.value)}
+                                                    rows={12}
+                                                    value={playMessages}
+                                                    onChange={(e) => setPlayMessages(e.target.value)}
                                                 />
-                                            </label>
-                                            <label className="field">
-                                                <span>User</span>
-                                                <textarea
-                                                    className="playground-textarea"
-                                                    rows={10}
-                                                    value={playUser}
-                                                    onChange={(e) => setPlayUser(e.target.value)}
-                                                />
-                                            </label>
-                                        </>
-                                    ) : (
-                                        <label className="field">
-                                            <span>Messages (JSON)</span>
-                                            <textarea
-                                                className="playground-textarea"
-                                                rows={12}
-                                                value={playMessages}
-                                                onChange={(e) => setPlayMessages(e.target.value)}
-                                            />
-                                        </label>
-                                    )}
-                                    <label className="field checkbox">
-                                        <input type="checkbox" checked={playStream} onChange={(e) => setPlayStream(e.target.checked)} />
-                                        <span>Stream output</span>
-                                    </label>
-                                    <div className="playground-actions">
-                                        <button className="btn quiet" onClick={onRunPlayground} disabled={playRunning}>
-                                            {playRunning ? "Running..." : "Run"}
-                                        </button>
-                                        {playError && <span className="error-inline">{playError}</span>}
-                                    </div>
+                                            </div>
+                                        )}
+                                        <Space align="center">
+                                            <Switch checked={playStream} onChange={setPlayStream} size="small" />
+                                            <Text className="toggle-label">Stream</Text>
+                                        </Space>
+                                        <Space align="center">
+                                            <Button type="primary" onClick={onRunPlayground} loading={playRunning}>
+                                                {playRunning ? "Running..." : "Run"}
+                                            </Button>
+                                            {playError && <Text className="error-inline">{playError}</Text>}
+                                        </Space>
+                                    </Space>
                                     <div className="playground-output">
-                                        {playError && <div className="playground-error">{playError}</div>}
+                                        {playError && (
+                                            <Alert type="error" message={playError} showIcon className="playground-error" />
+                                        )}
                                         <div className="panel-actions">
-                                            <button className="btn ghost small" onClick={() => copyText(playOutput)}>
+                                            <Button size="small" onClick={() => copyText(playOutput)}>
                                                 Copy
-                                            </button>
+                                            </Button>
                                         </div>
                                         <pre>{playOutput || "(no output yet)"}</pre>
                                     </div>
-                                </div>
+                                </Card>
                             )}
                         </div>
                     )}
                 </div>
-            </div>
-        </div>
+            </Content>
+        </Layout>
     );
 }
 
 export default function App() {
-    return <TraceUI />;
+    return (
+        <ConfigProvider
+            theme={{
+                token: {
+                    colorPrimary: "#0b5d47",
+                    colorInfo: "#0b5d47",
+                    colorSuccess: "#0f7a3c",
+                    colorError: "#b40000",
+                    borderRadius: 8,
+                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace",
+                },
+            }}
+        >
+            <TraceUI />
+        </ConfigProvider>
+    );
 }
