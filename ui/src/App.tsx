@@ -14,7 +14,6 @@ import ReactFlow, {
 } from "reactflow";
 import {
     Alert,
-    AutoComplete,
     Button,
     Card,
     ConfigProvider,
@@ -29,6 +28,7 @@ import {
     Tooltip,
     Typography,
 } from "antd";
+import Highlighter from "react-highlight-words";
 import "reactflow/dist/style.css";
 
 const { Header, Content } = Layout;
@@ -199,6 +199,18 @@ function tokenUsageFromAttributes(attrs: Record<string, string> | null | undefin
     };
 }
 
+function tokenizeQuery(query: string): string[] {
+    return query
+        .trim()
+        .toLowerCase()
+        .split(/\s+/)
+        .filter(Boolean);
+}
+
+function escapeRegex(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function parseDate(value: string): number {
     const ts = Date.parse(value);
     return Number.isNaN(ts) ? 0 : ts;
@@ -356,6 +368,20 @@ function buildLayout(root: TraceNodeJson, maxDepth: number | null, activeFoldIds
     return { flat: out, pos };
 }
 
+function buildFlatAll(root: TraceNodeJson) {
+    const out: FlattenedNode[] = [];
+    let index = 0;
+
+    const walk = (node: TraceNodeJson, parentId: string | null, depth: number, pathId: string) => {
+        out.push({ id: pathId, parentId, depth, order: index++, node });
+        const kids = sortChildren(node.children || {});
+        kids.forEach((child, idx) => walk(child, pathId, depth + 1, `${pathId}.${idx}`));
+    };
+
+    walk(root, null, 0, "root");
+    return out;
+}
+
 function totalCost(node: TraceNodeJson): number {
     let sum = node.cost || 0;
     for (const child of Object.values(node.children || {})) {
@@ -472,8 +498,9 @@ function TraceUI() {
     const resizer = useResizableSidebar(initialLeftWidth);
     const [searchTerm, setSearchTerm] = useState("");
     const [searchOpen, setSearchOpen] = useState(false);
-    const ignoreSearchChange = useRef(false);
+    const [searchActiveIndex, setSearchActiveIndex] = useState(0);
     const [flowInstance, setFlowInstance] = useState<any>(null);
+    const searchListRef = useRef<HTMLDivElement | null>(null);
     const fitTimer = useRef<number | null>(null);
     const [subtreeColorOn, setSubtreeColorOn] = useState(true);
     const maxDepth: number | null = null;
@@ -509,17 +536,15 @@ function TraceUI() {
 
     const fuzzyMatch = useCallback((text: string, query: string) => {
         const hay = text.toLowerCase();
-        const tokens = query
-            .trim()
-            .toLowerCase()
-            .split(/\s+/)
-            .filter(Boolean);
+        const tokens = tokenizeQuery(query);
         if (!tokens.length) return null;
+        const hits: number[] = [];
         for (const token of tokens) {
             const idx = hay.indexOf(token);
-            if (idx !== -1) return [idx];
+            if (idx === -1) return null;
+            hits.push(idx);
         }
-        return null;
+        return hits.length ? hits : null;
     }, []);
 
     useEffect(() => {
@@ -550,13 +575,12 @@ function TraceUI() {
         }
     }, []);
 
-    const { nodes, edges, nodeMap, searchIndex } = useMemo(() => {
+    const { nodes, edges, nodeMap } = useMemo(() => {
         if (!trace) {
             return {
                 nodes: [] as Node<TraceNodeData>[],
                 edges: [] as Edge[],
                 nodeMap: new Map<string, FlattenedNode>(),
-                searchIndex: [] as { id: string; text: string }[],
             };
         }
         const { flat, pos } = buildLayout(trace, maxDepth, activeFoldIds);
@@ -634,7 +658,20 @@ function TraceUI() {
                 markerEnd: undefined,
                 markerStart: undefined,
             }));
-        const searchIndexLocal = flat.map((item) => {
+        return { nodes: nodesLocal, edges: edgesLocal, nodeMap: nodeMapLocal };
+    }, [trace, subtreeColorOn, maxDepth, autoFoldOn, activeFoldIds, selectedId]);
+
+    const { searchIndex, searchNodeMap } = useMemo(() => {
+        if (!trace) {
+            return {
+                searchIndex: [] as { id: string; text: string }[],
+                searchNodeMap: new Map<string, FlattenedNode>(),
+            };
+        }
+        const flatAll = buildFlatAll(trace);
+        const nodeMapLocal = new Map<string, FlattenedNode>();
+        flatAll.forEach((item) => nodeMapLocal.set(item.id, item));
+        const searchIndexLocal = flatAll.map((item) => {
             const blob = JSON.stringify({
                 name: item.node.name,
                 kind: item.node.kind,
@@ -644,8 +681,8 @@ function TraceUI() {
             });
             return { id: item.id, text: blob };
         });
-        return { nodes: nodesLocal, edges: edgesLocal, nodeMap: nodeMapLocal, searchIndex: searchIndexLocal };
-    }, [trace, subtreeColorOn, maxDepth, autoFoldOn, activeFoldIds, selectedId]);
+        return { searchIndex: searchIndexLocal, searchNodeMap: nodeMapLocal };
+    }, [trace]);
 
     const selectedNode = selectedId ? nodeMap.get(selectedId) : null;
     const selectedTrace = selectedNode?.node || null;
@@ -781,45 +818,62 @@ function TraceUI() {
 
     const total = trace ? totalCost(trace) : 0;
     const searchResults = useMemo(() => {
-        if (!searchTerm.trim()) return [];
-        const results: { id: string; name: string; hits: number[]; nameHits: number[] | null }[] = [];
+        if (searchTerm.trim().length < 1) return [];
+        const results: {
+            id: string;
+            name: string;
+            hits: number[];
+            nameHits: number[] | null;
+            attrHits: number[] | null;
+            resultHits: number[] | null;
+        }[] = [];
         for (const item of searchIndex) {
-            const node = nodeMap.get(item.id)?.node;
+            const node = searchNodeMap.get(item.id)?.node;
             if (!node) continue;
-            const hits = fuzzyMatch(item.text, searchTerm.trim());
-            if (hits) {
-                const nameHits = node.name ? fuzzyMatch(node.name, searchTerm.trim()) : null;
-                results.push({ id: item.id, name: node.name || "(unnamed)", hits, nameHits });
-            }
+            const nameText = node.name || "";
+            const attrsText = JSON.stringify(node.attributes || {});
+            const resultText = node.result ? JSON.stringify(node.result) : "";
+            const nameHits = nameText ? fuzzyMatch(nameText, searchTerm.trim()) : null;
+            const attrHits = attrsText ? fuzzyMatch(attrsText, searchTerm.trim()) : null;
+            const resultHits = resultText ? fuzzyMatch(resultText, searchTerm.trim()) : null;
+            const hits = nameHits || attrHits || resultHits;
+            if (!hits) continue;
+            results.push({
+                id: item.id,
+                name: node.name || "(unnamed)",
+                hits,
+                nameHits,
+                attrHits,
+                resultHits,
+            });
         }
         return results
             .sort((a, b) => {
                 const aName = a.nameHits ? 1 : 0;
                 const bName = b.nameHits ? 1 : 0;
                 if (aName !== bName) return bName - aName;
+                const aAttr = a.attrHits ? 1 : 0;
+                const bAttr = b.attrHits ? 1 : 0;
+                if (aAttr !== bAttr) return bAttr - aAttr;
+                const aRes = a.resultHits ? 1 : 0;
+                const bRes = b.resultHits ? 1 : 0;
+                if (aRes !== bRes) return bRes - aRes;
                 return a.hits.length - b.hits.length;
             })
             .slice(0, 12);
-    }, [searchIndex, searchTerm, nodeMap, fuzzyMatch]);
+    }, [searchIndex, searchTerm, searchNodeMap, fuzzyMatch]);
 
     const highlightText = useCallback((text: string, query: string) => {
-        const tokens = query
-            .trim()
-            .toLowerCase()
-            .split(/\s+/)
-            .filter(Boolean);
+        const tokens = tokenizeQuery(query);
         if (!tokens.length) return text;
-        const parts = text.split(new RegExp(`(${tokens.join("|")})`, "gi"));
-        return parts.map((part, idx) => {
-            if (tokens.includes(part.toLowerCase())) {
-                return (
-                    <mark key={`${idx}-${part}`} className="search-hit">
-                        {part}
-                    </mark>
-                );
-            }
-            return <span key={`${idx}-${part}`}>{part}</span>;
-        });
+        return (
+            <Highlighter
+                searchWords={tokens}
+                textToHighlight={text}
+                autoEscape
+                highlightClassName="search-hit"
+            />
+        );
     }, []);
 
     const buildSnippet = useCallback((text: string, query: string, hits: number[]) => {
@@ -862,6 +916,40 @@ function TraceUI() {
         [flowInstance, nodeMap]
     );
 
+    useEffect(() => {
+        if (!selectedId || !flowInstance) return;
+        const handle = window.setTimeout(() => {
+            focusNodeById(selectedId);
+        }, 80);
+        return () => window.clearTimeout(handle);
+    }, [selectedId, flowInstance, focusNodeById, nodes.length, activeFoldIds]);
+
+    const resetSearchDropdown = useCallback(() => {
+        setSearchOpen(false);
+        setSearchActiveIndex(0);
+    }, []);
+
+    const expandToNode = useCallback(
+        (id: string) => {
+            const parts = id.split(".");
+            const ancestors: string[] = [];
+            for (let i = 1; i <= parts.length; i += 1) {
+                ancestors.push(parts.slice(0, i).join("."));
+            }
+            setManualFoldIds((prev) => {
+                const next = new Set(prev);
+                ancestors.forEach((a) => next.delete(a));
+                return next;
+            });
+            setManualExpandIds((prev) => {
+                const next = new Set(prev);
+                ancestors.forEach((a) => next.add(a));
+                return next;
+            });
+        },
+        [setManualFoldIds, setManualExpandIds]
+    );
+
     const handleTogglePlayEditor = useCallback(() => {
         if (playEditorMode === "split") {
             const messages: any[] = [];
@@ -884,24 +972,77 @@ function TraceUI() {
         }
     }, [playEditorMode, playMessages, playSystem, playUser]);
 
-    const searchOptions = useMemo(() => {
+    const searchCards = useMemo(() => {
         return searchResults.map((item) => {
-            const content = searchIndex.find((entry) => entry.id === item.id)?.text || "";
-            const snippet = buildSnippet(content, searchTerm, item.hits);
+            const node = searchNodeMap.get(item.id)?.node;
+            const base = node
+                ? JSON.stringify({
+                      name: node.name,
+                      attributes: node.attributes,
+                      result: node.result,
+                  })
+                : "";
+            const snippet = buildSnippet(base, searchTerm, item.hits);
             return {
-                value: item.name || "(unnamed)",
                 id: item.id,
-                label: (
-                    <div className="search-item">
-                        <div className="search-name">{highlightText(item.name, searchTerm)}</div>
-                        <div className="search-snippet">
-                            {snippet ? highlightText(snippet, searchTerm) : "-"}
-                        </div>
-                    </div>
-                ),
+                name: item.name || "(unnamed)",
+                snippet,
             };
         });
-    }, [searchResults, searchIndex, buildSnippet, highlightText, searchTerm]);
+    }, [searchResults, searchNodeMap, buildSnippet, searchTerm]);
+
+    useEffect(() => {
+        if (!searchOpen) return;
+        if (searchActiveIndex >= searchCards.length) {
+            setSearchActiveIndex(0);
+        }
+    }, [searchActiveIndex, searchCards.length, searchOpen]);
+
+    const commitSearchSelection = useCallback(
+        (item: { id: string; name: string }) => {
+            setSearchTerm(item.name);
+            expandToNode(item.id);
+            setSelectedId(item.id);
+            requestAnimationFrame(() => focusNodeById(item.id));
+            resetSearchDropdown();
+        },
+        [expandToNode, focusNodeById, resetSearchDropdown]
+    );
+
+    const handleSearchKeyDown = useCallback(
+        (event: React.KeyboardEvent<HTMLInputElement>) => {
+            if (!searchOpen || searchCards.length === 0) return;
+            if (event.key === "ArrowDown") {
+                event.preventDefault();
+                setSearchActiveIndex((prev) => Math.min(prev + 1, searchCards.length - 1));
+                return;
+            }
+            if (event.key === "ArrowUp") {
+                event.preventDefault();
+                setSearchActiveIndex((prev) => Math.max(prev - 1, 0));
+                return;
+            }
+            if (event.key === "Enter") {
+                event.preventDefault();
+                const target = searchCards[searchActiveIndex];
+                if (target) commitSearchSelection(target);
+                return;
+            }
+            if (event.key === "Escape") {
+                event.preventDefault();
+                resetSearchDropdown();
+            }
+        },
+        [searchOpen, searchCards, searchActiveIndex, commitSearchSelection, resetSearchDropdown]
+    );
+
+    useEffect(() => {
+        if (!searchListRef.current) return;
+        const active = searchListRef.current.querySelector<HTMLButtonElement>(
+            ".search-item.active"
+        );
+        active?.scrollIntoView({ block: "nearest" });
+    }, [searchActiveIndex]);
 
     const detailsItems = useMemo(() => {
         if (!selectedTrace) return [];
@@ -1061,41 +1202,54 @@ function TraceUI() {
                     </Title>
                 </Space>
                 <div className="search-box">
-                    <AutoComplete
+                    <Input
+                        size="large"
+                        placeholder="Search nodes..."
                         value={searchTerm}
-                        options={searchOptions}
-                        open={searchOpen && searchResults.length > 0}
-                        onChange={(value) => {
-                            if (ignoreSearchChange.current) {
-                                ignoreSearchChange.current = false;
-                                return;
-                            }
-                            setSearchTerm(value);
+                        onChange={(e) => {
+                            setSearchTerm(e.target.value);
                             setSearchOpen(true);
                         }}
-                        onSelect={(value, option) => {
-                            const opt = option as { id?: string };
-                            const selectedId = opt?.id ?? value;
-                            ignoreSearchChange.current = true;
-                            setSearchTerm(value);
-                            setSelectedId(selectedId);
-                            requestAnimationFrame(() => focusNodeById(selectedId));
-                            setSearchOpen(false);
-                        }}
+                        onKeyDown={handleSearchKeyDown}
+                        onFocus={() => setSearchOpen(true)}
+                        onBlur={() => setTimeout(() => resetSearchDropdown(), 150)}
                         className="search-input"
-                    >
-                        <Input
-                            size="large"
-                            placeholder="Search nodes..."
-                            onFocus={() => setSearchOpen(true)}
-                            onBlur={() => setTimeout(() => setSearchOpen(false), 150)}
-                        />
-                    </AutoComplete>
+                    />
+                    {searchOpen && searchCards.length > 0 && (
+                        <div className="search-dropdown" ref={searchListRef}>
+                            {searchCards.map((item, idx) => (
+                                <button
+                                    key={item.id}
+                                    type="button"
+                                    className={`search-item ${idx === searchActiveIndex ? "active" : ""}`}
+                                    onMouseDown={(e) => e.preventDefault()}
+                                    onClick={() => {
+                                        commitSearchSelection(item);
+                                    }}
+                                >
+                                    <div className="search-name">{highlightText(item.name, searchTerm)}</div>
+                                    <div className="search-snippet">
+                                        {item.snippet ? highlightText(item.snippet, searchTerm) : "-"}
+                                    </div>
+                                </button>
+                            ))}
+                        </div>
+                    )}
                 </div>
                 <Space size={16} align="center" className="top-controls">
                     <Space direction="vertical" size={4} className="toggle-stack">
                         <Space align="center">
-                            <Switch checked={autoFoldOn} onChange={setAutoFoldOn} size="small" />
+                            <Switch
+                                checked={autoFoldOn}
+                                onChange={(checked) => {
+                                    setAutoFoldOn(checked);
+                                    if (checked) {
+                                        setSearchTerm("");
+                                        setSearchOpen(false);
+                                    }
+                                }}
+                                size="small"
+                            />
                             <Text className="toggle-label">Auto fold</Text>
                         </Space>
                         <Text className="top-hint">Double-click a node to fold/unfold its subtree</Text>
