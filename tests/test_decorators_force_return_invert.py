@@ -98,10 +98,16 @@ async def test_return_and_invert():
         ._().Failure()
         .End()
     )
-    tree_invert = (
+    tree_invert_fail = (
         tinytasktree.Tree[Blackboard]("Invert")
         .Invert()
         ._().Failure()
+        .End()
+    )
+    tree_invert_ok = (
+        tinytasktree.Tree[Blackboard]("InvertOk")
+        .Invert()
+        ._().Function(lambda: "ok")
         .End()
     )
     # fmt: on
@@ -123,6 +129,13 @@ async def test_return_and_invert():
     context = tinytasktree.Context()
     blackboard = Blackboard(value="v")
     async with context.using_blackboard(blackboard):
-        result = await tree_invert(context)
+        result = await tree_invert_fail(context)
     assert result.is_ok()
     assert result.data is None
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(value="v")
+    async with context.using_blackboard(blackboard):
+        result = await tree_invert_ok(context)
+    assert not result.is_ok()
+    assert result.data == "ok"
