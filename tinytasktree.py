@@ -179,6 +179,7 @@ __all__ = (
     "FileTraceStorageHandler",
     "create_http_app",
     "run_httpserver",
+    "set_default_llm_api_key_factory",
     "Tree",
 )
 
@@ -1083,7 +1084,31 @@ class ParseJSON[B](LeafNode[B]):
 type LLMModelFactory[B] = Callable[[B], str]  # function(blackboard) => model
 type LLMMessagesFactory[B] = Callable[[B], list[JSON]]  # function(blackboard) => messages
 type LLMStreamFactory[B] = Callable[[B], bool]  # function(blackboard) => stream (bool)
-type LLMApiKeyFactory[B] = Callable[[B], str | None]  # function(blackboard) => api_key | None
+
+type LLMApiKeyFactory1[B] = Callable[[B], str | None]  # function(blackboard) => api_key | None
+type LLMApiKeyFactory2[B] = Callable[[B, str], str | None]  # function(blackboard, model_name) => api_key | None
+type LLMApiKeyFactory[B] = LLMApiKeyFactory1[B] | LLMApiKeyFactory2[B]
+
+_DEFAULT_GLOBAL_LLM_API_KEY_FACTORY: str | LLMApiKeyFactory[Any] | None = None
+_DEFAULT_GLOBAL_LLM_API_KEY_PARAMS_CNT: int = 0
+
+
+def set_default_llm_api_key_factory(api_key: str | LLMApiKeyFactory[Any] | None) -> None:
+    """Sets a global default API key (or factory) for LLM calls.
+
+    This is useful when you don't want to rely on environment variables and prefer
+    providing keys at a global scope.
+
+    Example::
+        tinytasktree.set_default_llm_api_key_factory(lambda b, model: b.api_keys[model])
+    """
+    global _DEFAULT_GLOBAL_LLM_API_KEY_FACTORY, _DEFAULT_GLOBAL_LLM_API_KEY_PARAMS_CNT
+    _DEFAULT_GLOBAL_LLM_API_KEY_FACTORY = api_key
+    if callable(api_key):
+        _DEFAULT_GLOBAL_LLM_API_KEY_PARAMS_CNT = _inspect_func_parameters_count(api_key)
+    else:
+        _DEFAULT_GLOBAL_LLM_API_KEY_PARAMS_CNT = 0
+
 
 # [async] function(blackboard, full_output, delta_content, finished[, finish_reason])
 # when finished = True, delta_content always be empty str.
@@ -1147,6 +1172,19 @@ class LLMNode[B](LeafNode[B]):
             tokens["total"] = int(total_tokens)
         return tokens or None
 
+    def _resolve_api_key(self, b: B, model: str) -> str | None:
+        api_key_source = self._api_key if self._api_key is not None else _DEFAULT_GLOBAL_LLM_API_KEY_FACTORY
+        if callable(api_key_source):
+            params_cnt = (
+                self._api_key_params_cnt if self._api_key is not None else _DEFAULT_GLOBAL_LLM_API_KEY_PARAMS_CNT
+            )
+            if params_cnt == 1:
+                return cast(LLMApiKeyFactory1[B], api_key_source)(b)
+            if params_cnt == 2:
+                return cast(LLMApiKeyFactory2[B], api_key_source)(b, model)
+            raise TasktreeProgrammingError(f"{self.fullname}: api_key factory params count invalid")
+        return api_key_source
+
     def __init__(
         self,
         model: str | LLMModelFactory[B],
@@ -1164,9 +1202,12 @@ class LLMNode[B](LeafNode[B]):
         self._api_key = api_key
         self._is_stream_on_delta_async = False
         self._stream_on_delta_params_cnt = 4
+        self._api_key_params_cnt = 0
         if stream_on_delta:
             self._is_stream_on_delta_async = inspect.iscoroutinefunction(stream_on_delta)
             self._stream_on_delta_params_cnt = _inspect_func_parameters_count(stream_on_delta)
+        if callable(api_key):
+            self._api_key_params_cnt = _inspect_func_parameters_count(api_key)
 
     def _try_record_cost(
         self,
@@ -1215,6 +1256,14 @@ class LLMNode[B](LeafNode[B]):
             assert self._stream_on_delta_params_cnt in {4, 5}, TasktreeProgrammingError(
                 f"{self.fullname}: stream callback params count invalid"
             )
+        if callable(self._api_key):
+            assert self._api_key_params_cnt in {1, 2}, TasktreeProgrammingError(
+                f"{self.fullname}: api_key factory params count invalid"
+            )
+        if self._api_key is None and callable(_DEFAULT_GLOBAL_LLM_API_KEY_FACTORY):
+            assert _DEFAULT_GLOBAL_LLM_API_KEY_PARAMS_CNT in {1, 2}, TasktreeProgrammingError(
+                f"{self.fullname}: default api_key factory params count invalid"
+            )
 
     async def _call_stream_delta_callback(
         self, b: B, full_output: str, delta_content: str, finished: bool, finish_reason: str
@@ -1241,7 +1290,7 @@ class LLMNode[B](LeafNode[B]):
         model = self._model(b) if callable(self._model) else self._model
         messages = self._messages(b) if callable(self._messages) else self._messages
         stream = self._stream(b) if callable(self._stream) else self._stream
-        api_key = self._api_key(b) if callable(self._api_key) else self._api_key
+        api_key = self._resolve_api_key(b, model)
         output = ""
         last_tokens: dict[str, int] | None = None
 
@@ -2328,7 +2377,10 @@ class Tree[B](_ForwardingChildNode[B]):
             - `[async] (blackboard, full_text: str, delta_content: str, finished: bool)`
             - `[async] (blackboard, full_text: str, delta_content: str, finished: bool, finish_reason: str)`
             Note: When `finished` is True, `delta_content` is an empty string.
-        :param api_key: Optional API key string or a factory function `f(blackboard) -> str`.
+        :param api_key: Optional API key string or a factory function:
+            - `f(blackboard) -> str | None`
+            - `f(blackboard, model_name) -> str | None`
+            If omitted, uses the global default from `set_default_llm_api_key_factory()`.
         :param name: Optional name for the node.
 
         Example::
