@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # ensure tinytasktree is importable
 
-from tinytasktree import Context, FileTraceStorageHandler, Result, Tree
+from tinytasktree import Context, FileTraceStorageHandler, Tree
 
 
 @dataclass
