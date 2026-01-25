@@ -114,20 +114,10 @@ cd ui && npm run dev
 - Results: nodes return `OK(data)` or `FAIL(data)` and composites propagate or short-circuit
 - Blackboard: a per-run data object passed through the tree via `Context`
 
-## Node Result & Status <span id="node-result-status"></span>
-
-- Every node returns a `Result` with a status (`OK` or `FAIL`) and an optional data payload
-- Composite nodes typically short-circuit on `FAIL` (e.g., `Sequence`) or on `OK` (e.g., `Selector`)
-- Decorators can override or invert status while preserving or transforming data
-
 ## Table of Contents <span id="ref"></span>
 
-- [Why tinytasktree?](#why-tinytasktree)
-- [Hello World](#hello-world)
-- [LLM Example](#llm-example)
-- [API Stability](#api-stability)
-- [Node Result & Status](#node-result-status)
 - [Node Reference](#node-reference)
+  - [Node Result & Status](#node-result-status)
   - [Leaf Nodes](#leaf-nodes)
     - [Function](#function)
     - [Log](#log)
@@ -163,6 +153,12 @@ cd ui && npm run dev
 
 ## Node Reference <span id="node-reference"></span> <a href="#ref">[↑]</a>
 
+### Node Result & Status <span id="node-result-status"></span>  <a href="#ref">[↑]</a>
+
+- Every node returns a `Result` with a status (`OK` or `FAIL`) and an optional data payload
+- Composite nodes typically short-circuit on `FAIL` (e.g., `Sequence`) or on `OK` (e.g., `Selector`)
+- Decorators can override or invert status while preserving or transforming data
+
 ### Leaf Nodes <span id="leaf-nodes"></span> <a href="#ref">[↑]</a>
 
 #### Function <span id="function"></span> <a href="#ref">[↑]</a>
@@ -184,7 +180,9 @@ Supported function forms:
 tree = (
     Tree()
     .Sequence()
-    ._().Function(lambda: "ok")
+    ._().Function(lambda: "ok1")
+    ._().Function(lambda blackboard: "ok2")
+    ._().Function(lambda blackboard, tracer: "ok3")
     .End()
 )
 ```
@@ -201,7 +199,9 @@ Usage:
 ```python
 tree = (
     Tree()
-    .Log("hello")
+    .Sequence()
+    ._().Log("hello step1")
+    ._().Log(lambda b: f"hello, step2: job={b.job_id}", level="debug")
     .End()
 )
 ```
@@ -217,7 +217,11 @@ Usage:
 ```python
 tree = (
     Tree()
-    .TODO()
+    .Sequence()
+    ._().TODO("Prepare the Params")
+    ._().TODO("Call the LLM")
+    ._().Function(real_step)
+    ._().TODO("Collect the result")
     .End()
 )
 ```
@@ -257,6 +261,21 @@ tree = (
 )
 ```
 
+or:
+
+```python
+def _set_value(b: Blackboard, v: int) -> None:
+    b.double_value = v * 2
+
+tree = (
+    Tree()
+    .Sequence()
+    ._().Function(lambda: 7)
+    ._().WriteBlackboard(_set_value)
+    .End()
+)
+```
+
 #### Assert <span id="assert"></span> <a href="#ref">[↑]</a>
 
 Checks a boolean condition and returns `OK(True)` or `FAIL(False)`.
@@ -271,6 +290,8 @@ tree = (
     Tree()
     .Sequence()
     ._().Assert(lambda: True)
+    ._().Assert("is_ready") # checks `blackboard.is_ready`
+    ._().Function(run_job)
     .End()
 )
 ```
@@ -285,7 +306,9 @@ Usage:
 ```python
 tree = (
     Tree()
-    .Failure()
+    .Selector()
+    ._().Assert("has_cache")
+    ._().Failure()
     .End()
 )
 ```
@@ -309,7 +332,7 @@ sub = (
 tree = (
     Tree()
     .Sequence()
-    ._().Subtree(sub)
+    ._().Subtree(sub) # or _().Subtree(sub, lambda b: SubBlackboard(b.text))
     .End()
 )
 ```
@@ -333,6 +356,20 @@ tree = (
 )
 ```
 
+another example:
+
+```python
+def set_parsed_value(b: blackboard, d: JSON) -> None:
+    b.parsed = d
+
+tree = (
+    Tree()
+    .Sequence()
+    ._().ParseJSON(src="raw_json", dst=set_parsed_value)
+    .End()
+)
+```
+
 #### LLM <span id="llm"></span> <a href="#ref">[↑]</a>
 
 Calls an LLM via LiteLLM and returns the output text. Supports streaming and API key factories.
@@ -347,7 +384,22 @@ Usage:
 tree = (
     Tree()
     .Sequence()
-    ._().LLM("openrouter/openai/gpt-4.1-mini", [{"role": "user", "content": "hi"}], stream=True)
+    ._().LLM("openrouter/openai/gpt-4.1-mini", [{"role": "user", "content": "hi"}])
+    .End()
+)
+```
+
+Streaming response example:
+
+```python
+def on_delta(b, full, delta, done, reason=""):
+    if delta:
+        print(delta, end="")
+
+tree = (
+    Tree()
+    .Sequence()
+    ._().LLM(lambda b: b.model, lambda b: b.messages, stream=True, stream_on_delta=on_delta)
     .End()
 )
 ```
@@ -390,6 +442,22 @@ tree = (
 )
 ```
 
+Selector is the typical choice for the fallback chain pattern:
+
+```python
+tree = (
+    Tree()
+    .Selector()
+    ._().Timeout(20)
+    ._()._().LLM("model1", llm_message)
+    ._().Timeout(20)
+    ._()._().LLM("model2", llm_message)
+    ._().Timeout(20)
+    ._()._().LLM("model3", llm_message)
+    .End()
+)
+```
+
 #### Parallel <span id="parallel"></span> <a href="#ref">[↑]</a>
 
 Runs children concurrently. Returns `OK` only if all children succeed.
@@ -425,6 +493,21 @@ tree = (
 )
 ```
 
+In a more detailed example:
+
+```python
+def build_params(b):
+    trees = [subtree1, subtree2]
+    bbs = [BB(x=1), BB(x=2)]
+    return trees, bbs
+
+tree = (
+    Tree()
+    .Gather(build_params, concurrency_limit=2)
+    .End()
+)
+```
+
 #### RandomSelector <span id="randomselector"></span> <a href="#ref">[↑]</a>
 
 Randomizes the child order (optionally weighted) and returns the first `OK`.
@@ -436,7 +519,7 @@ Usage:
 ```python
 tree = (
     Tree()
-    .RandomSelector(weights=[0.4, 0.4, 0.2])
+    .RandomSelector(weights=[0.4, 0.4, 0.2]) # or weights from a factory: lambda b: b.route_weights
     ._().Function(A)
     ._().Function(B)
     ._().Function(C)
@@ -464,6 +547,17 @@ tree = (
 )
 ```
 
+Or uses only `If` (without `Else`):
+
+```python
+tree = (
+    Tree()
+    .If("is_admin")
+    ._().Function(admin_flow)
+    .End()
+)
+```
+
 ### Decorator Nodes <span id="decorator-nodes"></span> <a href="#ref">[↑]</a>
 
 #### ForceOk <span id="forceok"></span> <a href="#ref">[↑]</a>
@@ -479,6 +573,17 @@ tree = (
     Tree()
     .ForceOk()
     ._().Failure()
+    .End()
+)
+```
+
+Or a `ForceOk` overriding the result:
+
+```python
+tree = (
+    Tree()
+    .ForceOk(lambda b: {"skipped": True})
+    ._().Function(best_effort)
     .End()
 )
 ```
@@ -545,7 +650,7 @@ Usage:
 ```python
 tree = (
     Tree()
-    .Retry(max_tries=3, sleep_secs=0.1)
+    .Retry(max_tries=3, sleep_secs=0.1) # or usage: [0.1, 0.2, 0.5]
     ._().Function(A)
     .End()
 )
@@ -587,6 +692,19 @@ tree = (
 )
 ```
 
+With `.Fallback()` example::
+
+```python
+tree = (
+    Tree()
+    .Timeout(2.0)
+    ._().Function(main_job)
+    ._().Fallback()
+    ._()._().Function(fallback_job)
+    .End()
+)
+```
+
 #### RedisCacher <span id="rediscacher"></span> <a href="#ref">[↑]</a>
 
 Caches child results in Redis. Optional `value_validator` invalidates stale cache.
@@ -600,8 +718,20 @@ Usage:
 ```python
 tree = (
     Tree()
-    .RedisCacher(redis_client, key_func=lambda b: "k")
-    ._().Function(A)
+    .RedisCacher(redis_client, key_func=lambda b: b.key, enabled=lambda b: b.use_cache)
+    ._().Function(expensive_call)
+    .End()
+)
+```
+
+With a `value_validator` example, in such case: the cache is only considered a hit if this
+value matches the one stored during the cache set. Useful for invalidating cache when dependent logic or state changes::
+
+```python
+tree = (
+    Tree()
+    .RedisCacher(redis_client, key_func=lambda b: f"user:{b.user_id}", value_validator=lambda b: b.version)
+    ._().Function(fetch_user)
     .End()
 )
 ```
@@ -624,6 +754,9 @@ tree = (
     ._()._().Function(B)
     .End()
 )
+
+# To trigger termination from an external script or process:
+await redis.set(f"stop:{job_id}", "1")
 ```
 
 #### Wrapper <span id="wrapper"></span> <a href="#ref">[↑]</a>
@@ -635,10 +768,21 @@ Usage:
 - Useful for custom setup/teardown or instrumentation
 
 ```python
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def traced(child, context):
+    try:
+        print("before run")
+        result = await child(context)
+        yield result
+    finally:
+        print("after run")
+
 tree = (
     Tree()
-    .Wrapper(my_async_cm)
-    ._().Function(A)
+    .Wrapper(traced)
+    ._().Function(run)
     .End()
 )
 ```
