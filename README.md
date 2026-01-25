@@ -1,6 +1,5 @@
 # tinytasktree
 
-[![License](https://img.shields.io/github/license/orion-arm-ai/tinytasktree)](LICENSE.txt)
 [![CI](https://github.com/orion-arm-ai/tinytasktree/actions/workflows/ci.yml/badge.svg)](https://github.com/orion-arm-ai/tinytasktree/actions/workflows/ci.yml)
 
 A tiny async task-tree orchestrator library for Python, behavior-tree inspired and LLM-ready.
