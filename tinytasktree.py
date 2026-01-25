@@ -98,6 +98,16 @@ Trace UI (React/Vite) runs separately and proxies to the HTTP server:
 
 Able to extend builder functions.
 
+### Hooks
+
+Set a global hook to run after any spawned task finishes (success or failure),
+such as tasks created by Parallel, Gather, or Terminable:
+
+    def cleanup(context: Context, tracer: Tracer, result: Result) -> None:
+        DBSession.close()
+
+    register_global_hook_after_spawned_task_finish(cleanup)
+
 ### Threading note:
 
 Recommended: define trees at module scope (built once at import), then reuse; if you build at runtime,
@@ -180,6 +190,7 @@ __all__ = (
     "create_http_app",
     "run_httpserver",
     "set_default_llm_api_key_factory",
+    "register_global_hook_after_spawned_task_finish",
     "Tree",
 )
 
@@ -1416,7 +1427,9 @@ class ParallelNode[B](CompositeNode[B]):
         semaphore: asyncio.Semaphore,
     ) -> Result:
         async with semaphore:
-            return await child(context)
+            result = await child(context)
+        await _call_spawned_task_finish_hook(context, context.current_tracer(), result)
+        return result
 
     @override
     async def _impl(self, context: Context, tracer: Tracer) -> Result:
@@ -1509,7 +1522,9 @@ class GatherNode[B, B1](LeafNode[B]):
         semaphore: asyncio.Semaphore,
     ) -> tuple[int, Result]:
         async with semaphore:
-            return child_index, await child(context)
+            result = await child(context)
+        await _call_spawned_task_finish_hook(context, context.current_tracer(), result)
+        return child_index, result
 
     @override
     async def _impl(self, context: Context, tracer: Tracer) -> Result:
@@ -1800,7 +1815,9 @@ class TerminableDecoratorNode[B](CompositeNode[B], DecoratorNode[B]):
 
     async def _run_child(self, child: Node, child_name: str, context: Context) -> Result:
         async with context._forward(child_name):
-            return await child(context)
+            result = await child(context)
+        await _call_spawned_task_finish_hook(context, context.current_tracer(), result)
+        return result
 
     @override
     async def _impl(self, context: Context, tracer: Tracer) -> Result:
@@ -2380,7 +2397,11 @@ class Tree[B](_ForwardingChildNode[B]):
         :param api_key: Optional API key string or a factory function:
             - `f(blackboard) -> str | None`
             - `f(blackboard, model_name) -> str | None`
-            If omitted, uses the global default from `set_default_llm_api_key_factory()`.
+            Resolution order:
+            1) `api_key` passed to this node
+            2) `set_default_llm_api_key_factory()`
+            3) Environment variables (LiteLLM)
+            4) None
         :param name: Optional name for the node.
 
         Example::
@@ -2924,6 +2945,37 @@ def set_default_global_redis_client(url: str, **kwargs) -> None:
     _DEFAULT_GLOBAL_REDIS_INSTANCE = cast(
         async_redis.Redis, ThreadLocalProxy(lambda: async_redis.Redis.from_url(url, **kwargs))
     )
+
+
+#############
+# Global Hooks
+#############
+
+type SpawnedTaskFinishHook = Callable[[Context, Tracer, Result], None | Awaitable[None]]
+
+_GLOBAL_HOOK_AFTER_SPAWNED_TASK_FINISH: list[SpawnedTaskFinishHook] = []
+
+
+def register_global_hook_after_spawned_task_finish(
+    hook: SpawnedTaskFinishHook,
+) -> None:
+    """Registers a global hook called after any spawned task finishes.
+
+    Useful for cleanup (e.g., closing db sessions) in async/parallel tasks.
+    """
+    _GLOBAL_HOOK_AFTER_SPAWNED_TASK_FINISH.append(hook)
+
+
+async def _call_spawned_task_finish_hook(context: Context, tracer: Tracer, result: Result) -> None:
+    if not _GLOBAL_HOOK_AFTER_SPAWNED_TASK_FINISH:
+        return
+    for hook in _GLOBAL_HOOK_AFTER_SPAWNED_TASK_FINISH:
+        try:
+            hook_result = hook(context, tracer, result)
+            if inspect.isawaitable(hook_result):
+                await hook_result
+        except Exception as hook_exc:
+            tracer.error(hook_exc)
 
 
 #############
