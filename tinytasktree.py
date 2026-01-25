@@ -2,7 +2,7 @@
 tinytasktree
 ============
 
-Async task orchestrator library for Python, inspired by Behavior Trees.
+A tiny async task-tree orchestrator library for Python, behavior-tree inspired and LLM-ready.
 
 Example::
 

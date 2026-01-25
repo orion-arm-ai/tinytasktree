@@ -1,8 +1,27 @@
 # tinytasktree
 
-A tiny async task-tree / behavior-tree style orchestrator for Python.
+A tiny async task-tree orchestrator library for Python, behavior-tree inspired and LLM-ready.
 
-## Example
+## Why tinytasktree?
+
+- Modular, composable task graph building blocks
+- Behavior-tree inspired control flow with explicit success/failure semantics
+- Async-first execution with local trace visualization
+
+## Hello World
+
+```python
+from tinytasktree import Tree
+
+tree = (
+    Tree("HelloWorld")
+    .Sequence()
+    ._().Function(lambda: "hello")
+    .End()
+)
+```
+
+## LLM Example
 
 ```python
 from dataclasses import dataclass
@@ -18,15 +37,11 @@ def make_messages(b: Blackboard) -> list[JSON]:
     return [{"role": "user", "content": b.prompt}]
 
 
-def write_response(b: Blackboard, data: str) -> None:
-    b.response = data
-
-
 tree = (
     Tree[Blackboard]("HelloWorld")
     .Sequence()
     ._().LLM("openrouter/openai/gpt-4.1-mini", make_messages)
-    ._().WriteBlackboard(write_response)
+    ._().WriteBlackboard("response")
     .End()
 )
 
@@ -43,9 +58,9 @@ async def main():
 ## Requirements
 
 - Python 3.13+
-- LiteLLM (LLM calls)
-- Redis (required by `Terminable` and `RedisCacher` nodes)
-- Uvicorn (required for the HTTP trace server)
+- LiteLLM (only needed for `LLM` nodes)
+- Redis (only needed for `Terminable` and `RedisCacher` nodes)
+- Uvicorn (only needed for the HTTP trace server)
 
 ## Features
 
@@ -84,8 +99,19 @@ cd ui && npm run dev
 # http://127.0.0.1:5173
 ```
 
+![](misc/tasktree-ui.png)
+
+## Design Notes
+
+- Execution model: nodes are awaited; composite nodes control child ordering and concurrency
+- Results: nodes return `OK(data)` or `FAIL(data)` and composites propagate or short-circuit
+- Blackboard: a per-run data object passed through the tree via `Context`
+
 ## Table of Contents <span id="ref"></span>
 
+- [Why tinytasktree?](#why-tinytasktree)
+- [Hello World](#hello-world)
+- [LLM Example](#llm-example)
 - [Node Reference](#node-reference)
   - [Leaf Nodes](#leaf-nodes)
     - [Function](#function)
@@ -119,11 +145,11 @@ cd ui && npm run dev
 - [Core APIs (Non-Node)](#core-apis-non-node)
 - [License](#license)
 
-## Node Reference <a href="#ref">[↑]</a>
+## Node Reference <span id="node-reference"></span> <a href="#ref">[↑]</a>
 
-### Leaf Nodes <a href="#ref">[↑]</a>
+### Leaf Nodes <span id="leaf-nodes"></span> <a href="#ref">[↑]</a>
 
-#### Function <a href="#ref">[↑]</a>
+#### Function <span id="function"></span> <a href="#ref">[↑]</a>
 
 Runs a sync/async function. Returns `OK(data)` for non-`Result` return values, or passes through a `Result`.
 
@@ -136,7 +162,7 @@ tree = (
 )
 ```
 
-#### Log <a href="#ref">[↑]</a>
+#### Log <span id="log"></span> <a href="#ref">[↑]</a>
 
 Logs a message into the trace. Always returns `OK(None)`.
 
@@ -148,7 +174,7 @@ tree = (
 )
 ```
 
-#### TODO <a href="#ref">[↑]</a>
+#### TODO <span id="todo"></span> <a href="#ref">[↑]</a>
 
 A placeholder node that always returns `OK(None)`.
 
@@ -160,7 +186,7 @@ tree = (
 )
 ```
 
-#### ShowBlackboard <a href="#ref">[↑]</a>
+#### ShowBlackboard <span id="showblackboard"></span> <a href="#ref">[↑]</a>
 
 Logs the current blackboard into the trace and returns `OK(None)`.
 
@@ -172,7 +198,7 @@ tree = (
 )
 ```
 
-#### WriteBlackboard <a href="#ref">[↑]</a>
+#### WriteBlackboard <span id="writeblackboard"></span> <a href="#ref">[↑]</a>
 
 Writes the previous node’s result into the blackboard, and returns `OK(data)`.
 
@@ -186,7 +212,7 @@ tree = (
 )
 ```
 
-#### Assert <a href="#ref">[↑]</a>
+#### Assert <span id="assert"></span> <a href="#ref">[↑]</a>
 
 Checks a boolean condition and returns `OK(True)` or `FAIL(False)`.
 
@@ -199,7 +225,7 @@ tree = (
 )
 ```
 
-#### Failure <a href="#ref">[↑]</a>
+#### Failure <span id="failure"></span> <a href="#ref">[↑]</a>
 
 Always returns `FAIL(None)`.
 
@@ -211,7 +237,7 @@ tree = (
 )
 ```
 
-#### Subtree <a href="#ref">[↑]</a>
+#### Subtree <span id="subtree"></span> <a href="#ref">[↑]</a>
 
 Runs another tree, optionally with a custom blackboard factory.
 
@@ -231,7 +257,7 @@ tree = (
 )
 ```
 
-#### ParseJSON <a href="#ref">[↑]</a>
+#### ParseJSON <span id="parsejson"></span> <a href="#ref">[↑]</a>
 
 Parses JSON from the last result or from a blackboard source, and returns the parsed object.
 
@@ -245,7 +271,7 @@ tree = (
 )
 ```
 
-#### LLM <a href="#ref">[↑]</a>
+#### LLM <span id="llm"></span> <a href="#ref">[↑]</a>
 
 Calls an LLM via LiteLLM and returns the output text. Supports streaming and API key factories.
 
@@ -261,9 +287,9 @@ tree = (
 )
 ```
 
-### Composite Nodes <a href="#ref">[↑]</a>
+### Composite Nodes <span id="composite-nodes"></span> <a href="#ref">[↑]</a>
 
-#### Sequence <a href="#ref">[↑]</a>
+#### Sequence <span id="sequence"></span> <a href="#ref">[↑]</a>
 
 Runs children in order. Returns `FAIL` on first failure, otherwise `OK(last_child_data)`.
 
@@ -277,7 +303,7 @@ tree = (
 )
 ```
 
-#### Selector <a href="#ref">[↑]</a>
+#### Selector <span id="selector"></span> <a href="#ref">[↑]</a>
 
 Runs children in order until one succeeds. Returns the first `OK`, else `FAIL`.
 
@@ -291,7 +317,7 @@ tree = (
 )
 ```
 
-#### Parallel <a href="#ref">[↑]</a>
+#### Parallel <span id="parallel"></span> <a href="#ref">[↑]</a>
 
 Runs children concurrently. Returns `OK` only if all children succeed.
 
@@ -305,7 +331,7 @@ tree = (
 )
 ```
 
-#### Gather <a href="#ref">[↑]</a>
+#### Gather <span id="gather"></span> <a href="#ref">[↑]</a>
 
 Runs multiple subtrees with their own blackboards and returns a list of results.
 
@@ -317,7 +343,7 @@ tree = (
 )
 ```
 
-#### RandomSelector <a href="#ref">[↑]</a>
+#### RandomSelector <span id="randomselector"></span> <a href="#ref">[↑]</a>
 
 Randomizes the child order (optionally weighted) and returns the first `OK`.
 
@@ -332,7 +358,7 @@ tree = (
 )
 ```
 
-#### If / Else <a href="#ref">[↑]</a>
+#### If / Else <span id="if--else"></span> <a href="#ref">[↑]</a>
 
 Conditional branch. If the condition is false and no else branch exists, returns `OK(None)`.
 
@@ -347,9 +373,9 @@ tree = (
 )
 ```
 
-### Decorator Nodes <a href="#ref">[↑]</a>
+### Decorator Nodes <span id="decorator-nodes"></span> <a href="#ref">[↑]</a>
 
-#### ForceOk <a href="#ref">[↑]</a>
+#### ForceOk <span id="forceok"></span> <a href="#ref">[↑]</a>
 
 Forces the result status to `OK`, optionally with a custom data factory.
 
@@ -362,7 +388,7 @@ tree = (
 )
 ```
 
-#### ForceFail <a href="#ref">[↑]</a>
+#### ForceFail <span id="forcefail"></span> <a href="#ref">[↑]</a>
 
 Forces the result status to `FAIL`, optionally with a custom data factory.
 
@@ -375,7 +401,7 @@ tree = (
 )
 ```
 
-#### Return <a href="#ref">[↑]</a>
+#### Return <span id="return"></span> <a href="#ref">[↑]</a>
 
 Preserves child status but replaces data with a factory result.
 
@@ -388,7 +414,7 @@ tree = (
 )
 ```
 
-#### Invert <a href="#ref">[↑]</a>
+#### Invert <span id="invert"></span> <a href="#ref">[↑]</a>
 
 Inverts child status while keeping data.
 
@@ -401,7 +427,7 @@ tree = (
 )
 ```
 
-#### Retry <a href="#ref">[↑]</a>
+#### Retry <span id="retry"></span> <a href="#ref">[↑]</a>
 
 Retries a child on failure for up to `max_tries` with optional sleeps.
 
@@ -414,7 +440,7 @@ tree = (
 )
 ```
 
-#### While <a href="#ref">[↑]</a>
+#### While <span id="while"></span> <a href="#ref">[↑]</a>
 
 Repeats child while condition is true, returns the last successful result.
 
@@ -427,7 +453,7 @@ tree = (
 )
 ```
 
-#### Timeout / Fallback <a href="#ref">[↑]</a>
+#### Timeout / Fallback <span id="timeout--fallback"></span> <a href="#ref">[↑]</a>
 
 Runs a child with a time limit. On timeout, runs the fallback child if provided.
 
@@ -441,7 +467,7 @@ tree = (
 )
 ```
 
-#### RedisCacher <a href="#ref">[↑]</a>
+#### RedisCacher <span id="rediscacher"></span> <a href="#ref">[↑]</a>
 
 Caches child results in Redis. Optional `value_validator` invalidates stale cache.
 
@@ -454,7 +480,7 @@ tree = (
 )
 ```
 
-#### Terminable <a href="#ref">[↑]</a>
+#### Terminable <span id="terminable"></span> <a href="#ref">[↑]</a>
 
 Runs a child while polling a Redis key for termination. Optionally runs a fallback.
 
@@ -469,7 +495,7 @@ tree = (
 )
 ```
 
-#### Wrapper <a href="#ref">[↑]</a>
+#### Wrapper <span id="wrapper"></span> <a href="#ref">[↑]</a>
 
 Wraps a child with a custom async context manager.
 
@@ -482,7 +508,7 @@ tree = (
 )
 ```
 
-## Core APIs (Non-Node)
+## Core APIs (Non-Node) <span id="core-apis-non-node"></span>
 
 - `Context`: runtime state (blackboard stack, trace root, path)
 - `TraceRoot` / `TraceNode`: structured trace tree
@@ -492,6 +518,6 @@ tree = (
 - `set_default_global_redis_client(url, **kwargs)`: global Redis client for Redis nodes
 - `run_httpserver(host, port, trace_dir)` / `create_http_app(...)`: HTTP trace server
 
-## License
+## License <span id="license"></span>
 
 MIT. See `LICENSE.txt`.
