@@ -605,13 +605,6 @@ class Node[B](ABC):
             tracer.set_end(result)
             if not swallow_cancel:
                 raise
-        except TasktreeProgrammingError as e:
-            exc = e
-            tracer.error(e)
-            result = Result.FAIL(None)
-            tracer.set_end(result)
-            # Programming errors should fail fast to surface incorrect usage.
-            raise
         except Exception as e:
             exc = e
             tracer.error(e)

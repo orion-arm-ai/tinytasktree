@@ -8,14 +8,12 @@ Steps:
 Expectations:
 - Gather returns OK with data list when all children succeed.
 - Gather returns FAIL when any child fails, but still returns data list.
-- Mismatched params raise TasktreeProgrammingError to fail fast.
+- Mismatched params result in FAIL(None) (exception is captured by Node.__call__).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-import pytest
 
 import tinytasktree
 
@@ -115,5 +113,7 @@ async def test_gather_params_mismatch():
     context = tinytasktree.Context()
     blackboard = ParentBoard(base=0)
     async with context.using_blackboard(blackboard):
-        with pytest.raises(tinytasktree.TasktreeProgrammingError):
-            await tree(context)
+        result = await tree(context)
+
+    assert not result.is_ok()
+    assert result.data is None
