@@ -575,6 +575,21 @@ class Node[B](ABC):
         return f"<{self.fullname}>"
 
     async def __call__(self, context: Context) -> Result:
+        return await self._call(context, swallow_cancel=True)
+
+    async def _call(self, context: Context, *, swallow_cancel: bool) -> Result:
+        """Internal execution helper.
+
+        Default behavior (swallow_cancel=True):
+        - Catch CancelledError.
+        - Record trace.
+        - Return FAIL(None) instead of propagating cancellation.
+
+        Timeout behavior (swallow_cancel=False):
+        - Let CancelledError bubble up.
+        - Allows asyncio.timeout to raise TimeoutError.
+        - Enables Timeout fallback to run.
+        """
         tracer = context.current_tracer()
         tracer.set_kind(self.KIND)
         exc: BaseException | None = None
@@ -587,7 +602,8 @@ class Node[B](ABC):
             tracer.error(e)
             result = Result.FAIL(None)
             tracer.set_end(result)
-            raise
+            if not swallow_cancel:
+                raise
         except Exception as e:
             exc = e
             tracer.error(e)
@@ -1745,7 +1761,7 @@ class TimeoutDecoratorNode[B](CompositeNode[B], DecoratorNode[B]):
         try:
             async with asyncio.timeout(self._secs):
                 async with context._forward(child0_name):
-                    return await child0(context)
+                    return await child0._call(context, swallow_cancel=False)
         except asyncio.TimeoutError as e:
             tracer.error(f"TimeoutError: {child0_name} {_format_exception(e)}")
             if len(children) == 1:
