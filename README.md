@@ -6,8 +6,7 @@ A tiny async task-tree / behavior-tree style orchestrator for Python.
 
 ```python
 from dataclasses import dataclass
-from tinytasktree import Tree
-import tinytasktree
+from tinytasktree import Tree, JSON, Context
 
 @dataclass
 class Blackboard:
@@ -15,7 +14,7 @@ class Blackboard:
     response: str = ""
 
 
-def make_messages(b: Blackboard) -> list[tinytasktree.JSON]:
+def make_messages(b: Blackboard) -> list[JSON]:
     return [{"role": "user", "content": b.prompt}]
 
 
@@ -32,7 +31,7 @@ tree = (
 )
 
 async def main():
-    context = tinytasktree.Context()
+    context = Context()
     blackboard = Blackboard(prompt="Say hello in JSON.")
     async with context.using_blackboard(blackboard):
         result = await tree(context)
@@ -58,6 +57,18 @@ async def main():
 - Trace collection and optional trace storage
 - UI trace viewer with HTTP server
 
+## Installation
+
+```bash
+uv add tinytasktree
+```
+
+or
+
+```bash
+pip install tinytasktree
+```
+
 ## UI Trace Server
 
 Run the backend server and the React UI to view traces:
@@ -73,7 +84,7 @@ cd ui && npm run dev
 # http://127.0.0.1:5173
 ```
 
-## Table of Contents
+## Table of Contents <span id="ref"></span>
 
 - [Node Reference](#node-reference)
   - [Leaf Nodes](#leaf-nodes)
@@ -108,11 +119,11 @@ cd ui && npm run dev
 - [Core APIs (Non-Node)](#core-apis-non-node)
 - [License](#license)
 
-## Node Reference
+## Node Reference <a href="#ref">[↑]</a>
 
-### Leaf Nodes
+### Leaf Nodes <a href="#ref">[↑]</a>
 
-#### Function
+#### Function <a href="#ref">[↑]</a>
 
 Runs a sync/async function. Returns `OK(data)` for non-`Result` return values, or passes through a `Result`.
 
@@ -125,7 +136,7 @@ tree = (
 )
 ```
 
-#### Log
+#### Log <a href="#ref">[↑]</a>
 
 Logs a message into the trace. Always returns `OK(None)`.
 
@@ -137,7 +148,7 @@ tree = (
 )
 ```
 
-#### TODO
+#### TODO <a href="#ref">[↑]</a>
 
 A placeholder node that always returns `OK(None)`.
 
@@ -149,7 +160,7 @@ tree = (
 )
 ```
 
-#### ShowBlackboard
+#### ShowBlackboard <a href="#ref">[↑]</a>
 
 Logs the current blackboard into the trace and returns `OK(None)`.
 
@@ -161,7 +172,7 @@ tree = (
 )
 ```
 
-#### WriteBlackboard
+#### WriteBlackboard <a href="#ref">[↑]</a>
 
 Writes the previous node’s result into the blackboard, and returns `OK(data)`.
 
@@ -175,7 +186,7 @@ tree = (
 )
 ```
 
-#### Assert
+#### Assert <a href="#ref">[↑]</a>
 
 Checks a boolean condition and returns `OK(True)` or `FAIL(False)`.
 
@@ -188,7 +199,7 @@ tree = (
 )
 ```
 
-#### Failure
+#### Failure <a href="#ref">[↑]</a>
 
 Always returns `FAIL(None)`.
 
@@ -200,7 +211,7 @@ tree = (
 )
 ```
 
-#### Subtree
+#### Subtree <a href="#ref">[↑]</a>
 
 Runs another tree, optionally with a custom blackboard factory.
 
@@ -220,7 +231,7 @@ tree = (
 )
 ```
 
-#### ParseJSON
+#### ParseJSON <a href="#ref">[↑]</a>
 
 Parses JSON from the last result or from a blackboard source, and returns the parsed object.
 
@@ -234,7 +245,7 @@ tree = (
 )
 ```
 
-#### LLM
+#### LLM <a href="#ref">[↑]</a>
 
 Calls an LLM via LiteLLM and returns the output text. Supports streaming and API key factories.
 
@@ -250,9 +261,9 @@ tree = (
 )
 ```
 
-### Composite Nodes
+### Composite Nodes <a href="#ref">[↑]</a>
 
-#### Sequence
+#### Sequence <a href="#ref">[↑]</a>
 
 Runs children in order. Returns `FAIL` on first failure, otherwise `OK(last_child_data)`.
 
@@ -266,7 +277,7 @@ tree = (
 )
 ```
 
-#### Selector
+#### Selector <a href="#ref">[↑]</a>
 
 Runs children in order until one succeeds. Returns the first `OK`, else `FAIL`.
 
@@ -280,7 +291,7 @@ tree = (
 )
 ```
 
-#### Parallel
+#### Parallel <a href="#ref">[↑]</a>
 
 Runs children concurrently. Returns `OK` only if all children succeed.
 
@@ -294,7 +305,7 @@ tree = (
 )
 ```
 
-#### Gather
+#### Gather <a href="#ref">[↑]</a>
 
 Runs multiple subtrees with their own blackboards and returns a list of results.
 
@@ -306,7 +317,7 @@ tree = (
 )
 ```
 
-#### RandomSelector
+#### RandomSelector <a href="#ref">[↑]</a>
 
 Randomizes the child order (optionally weighted) and returns the first `OK`.
 
@@ -321,7 +332,7 @@ tree = (
 )
 ```
 
-#### If / Else
+#### If / Else <a href="#ref">[↑]</a>
 
 Conditional branch. If the condition is false and no else branch exists, returns `OK(None)`.
 
@@ -336,9 +347,9 @@ tree = (
 )
 ```
 
-### Decorator Nodes
+### Decorator Nodes <a href="#ref">[↑]</a>
 
-#### ForceOk
+#### ForceOk <a href="#ref">[↑]</a>
 
 Forces the result status to `OK`, optionally with a custom data factory.
 
@@ -351,7 +362,7 @@ tree = (
 )
 ```
 
-#### ForceFail
+#### ForceFail <a href="#ref">[↑]</a>
 
 Forces the result status to `FAIL`, optionally with a custom data factory.
 
@@ -364,7 +375,7 @@ tree = (
 )
 ```
 
-#### Return
+#### Return <a href="#ref">[↑]</a>
 
 Preserves child status but replaces data with a factory result.
 
@@ -377,7 +388,7 @@ tree = (
 )
 ```
 
-#### Invert
+#### Invert <a href="#ref">[↑]</a>
 
 Inverts child status while keeping data.
 
@@ -390,7 +401,7 @@ tree = (
 )
 ```
 
-#### Retry
+#### Retry <a href="#ref">[↑]</a>
 
 Retries a child on failure for up to `max_tries` with optional sleeps.
 
@@ -403,7 +414,7 @@ tree = (
 )
 ```
 
-#### While
+#### While <a href="#ref">[↑]</a>
 
 Repeats child while condition is true, returns the last successful result.
 
@@ -416,7 +427,7 @@ tree = (
 )
 ```
 
-#### Timeout / Fallback
+#### Timeout / Fallback <a href="#ref">[↑]</a>
 
 Runs a child with a time limit. On timeout, runs the fallback child if provided.
 
@@ -430,7 +441,7 @@ tree = (
 )
 ```
 
-#### RedisCacher
+#### RedisCacher <a href="#ref">[↑]</a>
 
 Caches child results in Redis. Optional `value_validator` invalidates stale cache.
 
@@ -443,7 +454,7 @@ tree = (
 )
 ```
 
-#### Terminable
+#### Terminable <a href="#ref">[↑]</a>
 
 Runs a child while polling a Redis key for termination. Optionally runs a fallback.
 
@@ -458,7 +469,7 @@ tree = (
 )
 ```
 
-#### Wrapper
+#### Wrapper <a href="#ref">[↑]</a>
 
 Wraps a child with a custom async context manager.
 
