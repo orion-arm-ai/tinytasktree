@@ -3002,10 +3002,10 @@ def _inspect_func_parameters_count(func: Callable) -> int:
 def _orjson_default_serializer(obj: Any):
     if isinstance(obj, set):
         return list(obj)
-    elif isinstance(obj, date):
-        return obj.strftime("%Y-%m-%d")
     elif isinstance(obj, datetime):
         return obj.strftime("%Y-%m-%d %H:%M:%S")
+    elif isinstance(obj, date):
+        return obj.strftime("%Y-%m-%d")
     elif isinstance(obj, timedelta):
         return obj.total_seconds()
     elif isinstance(obj, Enum):
