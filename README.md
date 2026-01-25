@@ -1,5 +1,8 @@
 # tinytasktree
 
+[![License](https://img.shields.io/github/license/orion-arm-ai/tinytasktree)](LICENSE.txt)
+[![CI](https://github.com/orion-arm-ai/tinytasktree/actions/workflows/ci.yml/badge.svg)](https://github.com/orion-arm-ai/tinytasktree/actions/workflows/ci.yml)
+
 A tiny async task-tree orchestrator library for Python, behavior-tree inspired and LLM-ready.
 
 ## Why tinytasktree?
@@ -72,6 +75,10 @@ async def main():
 - Trace collection and optional trace storage
 - UI trace viewer with HTTP server
 
+## API Stability <span id="api-stability"></span>
+
+Alpha. Expect breaking changes until the API is stabilized.
+
 ## Installation
 
 ```bash
@@ -107,11 +114,19 @@ cd ui && npm run dev
 - Results: nodes return `OK(data)` or `FAIL(data)` and composites propagate or short-circuit
 - Blackboard: a per-run data object passed through the tree via `Context`
 
+## Node Result & Status <span id="node-result-status"></span>
+
+- Every node returns a `Result` with a status (`OK` or `FAIL`) and an optional data payload
+- Composite nodes typically short-circuit on `FAIL` (e.g., `Sequence`) or on `OK` (e.g., `Selector`)
+- Decorators can override or invert status while preserving or transforming data
+
 ## Table of Contents <span id="ref"></span>
 
 - [Why tinytasktree?](#why-tinytasktree)
 - [Hello World](#hello-world)
 - [LLM Example](#llm-example)
+- [API Stability](#api-stability)
+- [Node Result & Status](#node-result-status)
 - [Node Reference](#node-reference)
   - [Leaf Nodes](#leaf-nodes)
     - [Function](#function)
@@ -143,6 +158,7 @@ cd ui && npm run dev
     - [Terminable](#terminable)
     - [Wrapper](#wrapper)
 - [Core APIs (Non-Node)](#core-apis-non-node)
+- [Contributing](#contributing)
 - [License](#license)
 
 ## Node Reference <span id="node-reference"></span> <a href="#ref">[↑]</a>
@@ -152,6 +168,17 @@ cd ui && npm run dev
 #### Function <span id="function"></span> <a href="#ref">[↑]</a>
 
 Runs a sync/async function. Returns `OK(data)` for non-`Result` return values, or passes through a `Result`.
+
+Usage:
+- Accepts 0/1/2 params: (), (blackboard), (blackboard, tracer)
+- Sync or async functions are supported
+- Returning `Result` bypasses wrapping; otherwise `OK(value)`
+
+Supported function forms:
+- `() -> Any` or `() -> Result`
+- `(blackboard) -> Any` or `(blackboard) -> Result`
+- `(blackboard, tracer) -> Any` or `(blackboard, tracer) -> Result`
+- Async variants of all the above
 
 ```python
 tree = (
@@ -166,6 +193,11 @@ tree = (
 
 Logs a message into the trace. Always returns `OK(None)`.
 
+Usage:
+- `msg_or_factory`: string or `(blackboard) -> str`
+- `level`: trace level (default: info)
+- Emits a trace log entry and continues
+
 ```python
 tree = (
     Tree()
@@ -178,6 +210,10 @@ tree = (
 
 A placeholder node that always returns `OK(None)`.
 
+Usage:
+- No-op leaf for scaffolding or TODO spots
+- Replace with real nodes later
+
 ```python
 tree = (
     Tree()
@@ -188,7 +224,11 @@ tree = (
 
 #### ShowBlackboard <span id="showblackboard"></span> <a href="#ref">[↑]</a>
 
-Logs the current blackboard into the trace and returns `OK(None)`.
+Returns the current blackboard in `OK(b)`.
+
+Usage:
+- Helpful for debugging or inspection
+- Downstream nodes can consume the returned blackboard
 
 ```python
 tree = (
@@ -200,7 +240,12 @@ tree = (
 
 #### WriteBlackboard <span id="writeblackboard"></span> <a href="#ref">[↑]</a>
 
-Writes the previous node’s result into the blackboard, and returns `OK(data)`.
+Writes the previous node's result into the blackboard, and returns `OK(data)`.
+
+Usage:
+- `attr_or_func`: attribute name or `(blackboard, data) -> None`
+- Reads `last_result.data`; warns if no last result
+- Returns `OK(data)` (or `OK(None)` if missing)
 
 ```python
 tree = (
@@ -216,6 +261,11 @@ tree = (
 
 Checks a boolean condition and returns `OK(True)` or `FAIL(False)`.
 
+Usage:
+- Condition can be attr name or function
+- Sync/async; params 0/1/2: (), (blackboard), (blackboard, tracer)
+- `AssertionError` is treated as false
+
 ```python
 tree = (
     Tree()
@@ -229,6 +279,9 @@ tree = (
 
 Always returns `FAIL(None)`.
 
+Usage:
+- Useful for tests, guards, or forcing failures
+
 ```python
 tree = (
     Tree()
@@ -240,6 +293,10 @@ tree = (
 #### Subtree <span id="subtree"></span> <a href="#ref">[↑]</a>
 
 Runs another tree, optionally with a custom blackboard factory.
+
+Usage:
+- `subtree_blackboard_factory`: `(parent_blackboard) -> child_blackboard`
+- Result is the subtree's result
 
 ```python
 sub = (
@@ -261,6 +318,11 @@ tree = (
 
 Parses JSON from the last result or from a blackboard source, and returns the parsed object.
 
+Usage:
+- `src`: last result (default), blackboard attr, or `(blackboard) -> str`
+- `dst`: optional blackboard attr or `(blackboard, data) -> None`
+- Uses `orjson` with `json-repair` fallback and supports JSON code fences
+
 ```python
 tree = (
     Tree()
@@ -275,14 +337,17 @@ tree = (
 
 Calls an LLM via LiteLLM and returns the output text. Supports streaming and API key factories.
 
+Usage:
+- `model` / `messages` can be values or `(blackboard) -> ...` factories
+- `stream`: bool or `(blackboard) -> bool`; `stream_on_delta` supports sync/async callbacks
+- `api_key`: string or factory `(blackboard)` / `(blackboard, model)`
+- Tracer records tokens/cost when available
+
 ```python
 tree = (
     Tree()
     .Sequence()
-    ._().LLM(
-        "openrouter/openai/gpt-4.1-mini",
-        [{"role": "user", "content": "hi"}],
-    )
+    ._().LLM("openrouter/openai/gpt-4.1-mini", [{"role": "user", "content": "hi"}], stream=True)
     .End()
 )
 ```
@@ -292,6 +357,10 @@ tree = (
 #### Sequence <span id="sequence"></span> <a href="#ref">[↑]</a>
 
 Runs children in order. Returns `FAIL` on first failure, otherwise `OK(last_child_data)`.
+
+Usage:
+- Stops on first `FAIL` and returns last successful data
+- Empty sequence returns `OK(None)`
 
 ```python
 tree = (
@@ -307,6 +376,10 @@ tree = (
 
 Runs children in order until one succeeds. Returns the first `OK`, else `FAIL`.
 
+Usage:
+- Short-circuits on first success
+- Empty selector returns `OK(None)`
+
 ```python
 tree = (
     Tree()
@@ -320,6 +393,10 @@ tree = (
 #### Parallel <span id="parallel"></span> <a href="#ref">[↑]</a>
 
 Runs children concurrently. Returns `OK` only if all children succeed.
+
+Usage:
+- `concurrency_limit` must be > 0
+- Result data is `None`
 
 ```python
 tree = (
@@ -335,6 +412,11 @@ tree = (
 
 Runs multiple subtrees with their own blackboards and returns a list of results.
 
+Usage:
+- `params_factory`: `(blackboard) -> (trees, blackboards)`
+- Runs each tree with its paired blackboard
+- Returns list of child data in tree order
+
 ```python
 tree = (
     Tree()
@@ -347,10 +429,14 @@ tree = (
 
 Randomizes the child order (optionally weighted) and returns the first `OK`.
 
+Usage:
+- `weights`: list or `(blackboard) -> list[float]`
+- Weights must be positive and match child count
+
 ```python
 tree = (
     Tree()
-    .RandomSelector(weights=[1, 2, 3])
+    .RandomSelector(weights=[0.4, 0.4, 0.2])
     ._().Function(A)
     ._().Function(B)
     ._().Function(C)
@@ -361,6 +447,11 @@ tree = (
 #### If / Else <span id="if--else"></span> <a href="#ref">[↑]</a>
 
 Conditional branch. If the condition is false and no else branch exists, returns `OK(None)`.
+
+Usage:
+- Condition supports attr name or function (sync/async)
+- 1 child (if) or 2 children (if + else)
+- `Else` node must be a child of `If`
 
 ```python
 tree = (
@@ -379,6 +470,10 @@ tree = (
 
 Forces the result status to `OK`, optionally with a custom data factory.
 
+Usage:
+- Optional `result_factory(blackboard) -> data`
+- If omitted, preserves child data
+
 ```python
 tree = (
     Tree()
@@ -391,6 +486,10 @@ tree = (
 #### ForceFail <span id="forcefail"></span> <a href="#ref">[↑]</a>
 
 Forces the result status to `FAIL`, optionally with a custom data factory.
+
+Usage:
+- Optional `result_factory(blackboard) -> data`
+- If omitted, preserves child data
 
 ```python
 tree = (
@@ -405,6 +504,10 @@ tree = (
 
 Preserves child status but replaces data with a factory result.
 
+Usage:
+- `result_factory(blackboard) -> data`
+- Status is unchanged from child
+
 ```python
 tree = (
     Tree()
@@ -417,6 +520,10 @@ tree = (
 #### Invert <span id="invert"></span> <a href="#ref">[↑]</a>
 
 Inverts child status while keeping data.
+
+Usage:
+- `OK` becomes `FAIL`, `FAIL` becomes `OK`
+- Data is preserved
 
 ```python
 tree = (
@@ -431,6 +538,10 @@ tree = (
 
 Retries a child on failure for up to `max_tries` with optional sleeps.
 
+Usage:
+- `sleep_secs`: float or list per retry index
+- Returns first `OK`, else `FAIL(None)`
+
 ```python
 tree = (
     Tree()
@@ -444,6 +555,10 @@ tree = (
 
 Repeats child while condition is true, returns the last successful result.
 
+Usage:
+- Condition supports attr name or function (sync/async)
+- `max_loop_times` guards infinite loops
+
 ```python
 tree = (
     Tree()
@@ -456,6 +571,11 @@ tree = (
 #### Timeout / Fallback <span id="timeout--fallback"></span> <a href="#ref">[↑]</a>
 
 Runs a child with a time limit. On timeout, runs the fallback child if provided.
+
+Usage:
+- `Timeout` has 1 child (main) or 2 (main + fallback)
+- On timeout, returns `FAIL(None)` or executes fallback
+- `Fallback` node must be a child of `Timeout` or `Terminable`
 
 ```python
 tree = (
@@ -471,6 +591,12 @@ tree = (
 
 Caches child results in Redis. Optional `value_validator` invalidates stale cache.
 
+Usage:
+- `key_func(blackboard) -> str`, optional `redis_client`
+- `expiration`: seconds, `timedelta`, or random `(min, max)`
+- `value_validator`: `(blackboard)` or `(blackboard, tracer)`
+- `enabled`: bool or `(blackboard) -> bool`
+
 ```python
 tree = (
     Tree()
@@ -483,6 +609,11 @@ tree = (
 #### Terminable <span id="terminable"></span> <a href="#ref">[↑]</a>
 
 Runs a child while polling a Redis key for termination. Optionally runs a fallback.
+
+Usage:
+- `key_func(blackboard) -> redis_key`, optional `redis_client`
+- Monitors until key exists; then cancels child
+- 1 child (main) or 2 (main + fallback)
 
 ```python
 tree = (
@@ -498,6 +629,10 @@ tree = (
 #### Wrapper <span id="wrapper"></span> <a href="#ref">[↑]</a>
 
 Wraps a child with a custom async context manager.
+
+Usage:
+- `func(child, context) -> async context manager` yielding a `Result`
+- Useful for custom setup/teardown or instrumentation
 
 ```python
 tree = (
@@ -517,6 +652,12 @@ tree = (
 - `set_default_llm_api_key_factory(factory_or_key)`: default LLM API key or factory
 - `set_default_global_redis_client(url, **kwargs)`: global Redis client for Redis nodes
 - `run_httpserver(host, port, trace_dir)` / `create_http_app(...)`: HTTP trace server
+
+## Contributing <span id="contributing"></span>
+
+- Install dev dependencies: `uv sync --dev`
+- Lint: `uv run ruff check .`
+- Test: `uv run pytest` (requires a local Redis on `redis://127.0.0.1:6379`)
 
 ## License <span id="license"></span>
 
