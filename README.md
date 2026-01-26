@@ -78,7 +78,7 @@ async def main():
 
 Alpha. Expect breaking changes until the API is stabilized.
 
-⚠️ Warning: This is currently only version alpha-0.1.0, and future API changes may introduce breaking changes.
+⚠️ Warning: This is currently only at ALPHA STAGE, and future API changes may introduce breaking changes.
 
 ## Installation
 

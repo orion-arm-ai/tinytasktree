@@ -1,6 +1,6 @@
 [project]
 name = "tinytasktree"
-version = "0.1.0"
+version = "0.1.1"
 description = "A tiny async task-tree orchestrator for Python, behavior-tree inspired and LLM-ready."
 readme = "README.md"
 requires-python = ">=3.13,<3.15"
@@ -15,6 +15,9 @@ dependencies = [
     "fastapi>=0.128.0",
     "uvicorn>=0.29.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/orion-arm-ai/tinytasktree"
 
 [build-system]
 requires = ["setuptools>=69", "wheel"]

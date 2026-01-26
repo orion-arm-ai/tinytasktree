@@ -16,3 +16,4 @@ prune node_modules
 prune tests
 prune tinytasktree.egg-info
 prune ui
+prune build
