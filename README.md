@@ -59,7 +59,7 @@ async def main():
 
 ## Requirements
 
-- Python 3.13+
+- Python 3.13–3.14 (3.15 is not yet supported due to upstream PyO3/fastuuid compatibility)
 - LiteLLM (only needed for `LLM` nodes)
 - Redis (only needed for `Terminable` and `RedisCacher` nodes)
 - Uvicorn (only needed for the HTTP trace server)

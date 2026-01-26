@@ -3,6 +3,7 @@ tinytasktree
 ============
 
 A tiny async task-tree orchestrator library for Python, behavior-tree inspired and LLM-ready.
+Requires Python 3.13 or 3.14 (3.15 is not yet supported due to upstream PyO3/fastuuid compatibility).
 
 Example::
 
