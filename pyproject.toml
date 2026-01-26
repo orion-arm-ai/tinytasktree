@@ -2,6 +2,7 @@
 name = "tinytasktree"
 version = "0.1.0"
 description = "A tiny async task-tree orchestrator for Python, behavior-tree inspired and LLM-ready."
+copyright = "Copyright (c) 2026 OrionArm.AI; chao.wang_at_orionarm.ai"
 readme = "README.md"
 requires-python = ">=3.13"
 classifiers = [
