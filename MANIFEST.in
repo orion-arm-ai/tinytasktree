@@ -1,0 +1,18 @@
+# Exclude non-package artifacts from source distributions
+global-exclude *.pyc
+exclude .env
+exclude test.py
+exclude uv.lock
+exclude .DS_Store
+prune .ruff_cache
+prune .traces
+prune .venv
+prune .mypy_cache
+prune .pytest_cache
+prune __pycache__
+prune dist
+prune examples
+prune node_modules
+prune tests
+prune tinytasktree.egg-info
+prune ui
