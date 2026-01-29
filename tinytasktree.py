@@ -1225,6 +1225,7 @@ class LLMNode[B](LeafNode[B]):
         stream_on_delta: LLMStreamOnChunkCallback[B] | None = None,
         api_key: str | LLMApiKeyFactory[B] | None = None,
         name: str = "",
+        **llm_call_kwargs,
     ) -> None:
         LeafNode.__init__(self, name)
         self._model = model
@@ -1240,6 +1241,7 @@ class LLMNode[B](LeafNode[B]):
             self._stream_on_delta_params_cnt = _inspect_func_parameters_count(stream_on_delta)
         if callable(api_key):
             self._api_key_params_cnt = _inspect_func_parameters_count(api_key)
+        self._llm_call_kwargs = llm_call_kwargs
 
     def _try_record_cost(
         self,
@@ -1329,6 +1331,7 @@ class LLMNode[B](LeafNode[B]):
         tracer.update_attributes(model=model)
         tracer.update_attributes(messages=messages)
         tracer.update_attributes(stream=stream)
+        tracer.update_attributes(**self._llm_call_kwargs)
         if api_key is not None:
             tracer.update_attributes(api_key="***")
 
@@ -1336,6 +1339,7 @@ class LLMNode[B](LeafNode[B]):
         kwargs: dict[str, Any] = {"model": model, "messages": messages, "stream": stream}
         if api_key is not None:
             kwargs["api_key"] = api_key
+        kwargs.update(self._llm_call_kwargs or {})
         response = await litellm.acompletion(**kwargs)
 
         cost_reported = False
@@ -2399,6 +2403,7 @@ class Tree[B](_ForwardingChildNode[B]):
         stream_on_delta: LLMStreamOnChunkCallback[B] | None = None,
         api_key: str | LLMApiKeyFactory[B] | None = None,
         name: str = "",
+        **llm_call_kwargs,
     ) -> Self:
         """
         Invokes an LLM (Large Language Model).
@@ -2424,6 +2429,8 @@ class Tree[B](_ForwardingChildNode[B]):
             3) Environment variables (LiteLLM)
             4) None
         :param name: Optional name for the node.
+        :param llm_call_kwargs: Any other keyword arguments supported by `litellm.acompletion`
+            such as `reasoning_effort`, `max_tokens`, `temperature`
 
         Example::
 
@@ -2433,7 +2440,7 @@ class Tree[B](_ForwardingChildNode[B]):
             ._().WriteBlackboard("ai_response")
             .End()
         """
-        return self._attach(LLMNode[B](model, messages, stream, stream_on_delta, api_key, name))
+        return self._attach(LLMNode[B](model, messages, stream, stream_on_delta, api_key, name, **llm_call_kwargs))
 
     def Subtree[B1](
         self,
