@@ -1,4 +1,4 @@
-"""LLM call with extra kwargs forwarded to LiteLLM.
+"""LLM call with extra kwargs forwarded to openai-python.
 
 Shows how to pass arbitrary keyword arguments (e.g. temperature, max_tokens)
 through Tree.LLM via **llm_call_kwargs.
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from tinytasktree import Context, FileTraceStorageHandler, Tree
 
-# Running this example requires setting OS ENV variable `OPENROUTER_API_KEY`.
+# Running this example requires setting `OPENROUTER_API_KEY` or `OPENAI_API_KEY`.
 
 
 @dataclass

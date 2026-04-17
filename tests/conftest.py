@@ -17,30 +17,53 @@ import tinytasktree  # noqa: E402
 
 
 @pytest.fixture
-def mock_litellm(monkeypatch):
+def mock_openai(monkeypatch):
     state = {
         "content": '{"greeting": "hello", "numbers": [1, 2, 3]}',
         "finish_reason": "stop",
         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
         "hidden": {"response_cost": 0.0},
         "handler": None,
+        "client_kwargs": [],
+        "request_kwargs": [],
     }
 
-    async def fake_acompletion(**kwargs):
-        handler = state["handler"]
-        if handler is not None:
-            if inspect.iscoroutinefunction(handler):
-                return await handler(**kwargs)
-            result = handler(**kwargs)
-            if asyncio.iscoroutine(result):
-                return await result
-            return result
-        content = state["content"]
-        return {
-            "choices": [{"message": {"content": content}, "finish_reason": state["finish_reason"]}],
-            "usage": state["usage"],
-            "_hidden_params": state["hidden"],
-        }
+    class FakeChatCompletions:
+        def __init__(self, client_kwargs: dict):
+            self._client_kwargs = client_kwargs
+
+        async def create(self, **kwargs):
+            state["request_kwargs"].append(kwargs)
+            handler = state["handler"]
+            if handler is not None:
+                if inspect.iscoroutinefunction(handler):
+                    return await handler(client_kwargs=self._client_kwargs, **kwargs)
+                result = handler(client_kwargs=self._client_kwargs, **kwargs)
+                if asyncio.iscoroutine(result):
+                    return await result
+                return result
+
+            content = state["content"]
+            return {
+                "choices": [{"message": {"content": content}, "finish_reason": state["finish_reason"]}],
+                "usage": state["usage"],
+                "_hidden_params": state["hidden"],
+            }
+
+    class FakeChat:
+        def __init__(self, client_kwargs: dict):
+            self.completions = FakeChatCompletions(client_kwargs)
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            state["client_kwargs"].append(kwargs)
+            self.chat = FakeChat(kwargs)
+
+        async def close(self) -> None:
+            return None
+
+    def fake_new_async_openai_client(**kwargs):
+        return FakeClient(**kwargs)
 
     def configure(
         *,
@@ -61,7 +84,9 @@ def mock_litellm(monkeypatch):
         if handler is not None:
             state["handler"] = handler
 
-    monkeypatch.setattr(tinytasktree.litellm, "acompletion", fake_acompletion)
+    configure.state = state  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(tinytasktree, "_new_async_openai_client", fake_new_async_openai_client)
     return configure
 
 

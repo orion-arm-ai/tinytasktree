@@ -26,8 +26,8 @@ def make_messages(b: Blackboard) -> list[tinytasktree.JSON]:
     return [{"role": "user", "content": b.prompt}]
 
 
-async def test_simple_tree_llm_parse_json(mock_litellm):
-    mock_litellm(content='{"answer": "ok", "count": 2}')
+async def test_simple_tree_llm_parse_json(mock_openai):
+    mock_openai(content='{"answer": "ok", "count": 2}')
     # fmt: off
     tree = (
         tinytasktree.Tree[Blackboard]("SimpleTree")

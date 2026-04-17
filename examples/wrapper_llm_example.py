@@ -11,14 +11,12 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import AsyncGenerator
 
-import litellm
-
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # ensure tinytasktree is importable
 
 from tinytasktree import JSON, Context, FileTraceStorageHandler, Result, Tree
 
 # Requirements:
-#   - OPENROUTER_API_KEY set for OpenRouter access via LiteLLM
+#   - OPENROUTER_API_KEY set for OpenRouter access via openai-python compatibility
 
 
 @dataclass
@@ -70,11 +68,6 @@ async def main() -> None:
     storage = FileTraceStorageHandler(".traces")
     trace_id = await storage.save(context.trace_root())
     print("Trace URL:", f"http://127.0.0.1:5173/{trace_id}")
-
-    # prevent litellm introducing wired at-exit warnings..
-
-    await litellm.close_litellm_async_clients()
-
 
 if __name__ == "__main__":
     asyncio.run(main())

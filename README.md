@@ -42,7 +42,7 @@ def make_messages(b: Blackboard) -> list[JSON]:
 tree = (
     Tree[Blackboard]("HelloWorld")
     .Sequence()
-    ._().LLM("openrouter/openai/gpt-4.1-mini", make_messages)
+    ._().LLM("gpt-4.1-mini", make_messages)
     ._().WriteBlackboard("response")
     .End()
 )
@@ -60,7 +60,7 @@ async def main():
 ## Requirements
 
 - Python 3.13–3.14 (3.15 is not yet supported due to upstream PyO3/fastuuid compatibility)
-- LiteLLM (only needed for `LLM` nodes)
+- openai-python (only needed for `LLM` nodes)
 - Redis (only needed for `Terminable` and `RedisCacher` nodes)
 - Uvicorn (only needed for the HTTP trace server)
 
@@ -69,7 +69,7 @@ async def main():
 - Minimal, expressive tree builder API
 - Async-first execution model
 - Leaf / Composite / Decorator nodes built-in
-- LLM integration via LiteLLM
+- LLM integration via openai-python
 - Redis-backed caching and termination signaling
 - Trace collection and optional trace storage
 - UI trace viewer with HTTP server
@@ -373,19 +373,21 @@ tree = (
 
 #### LLM <span id="llm"></span> <a href="#ref">[↑]</a>
 
-Calls an LLM via LiteLLM and returns the output text. Supports streaming and API key factories.
+Calls an LLM via openai-python and returns the output text. Supports streaming,
+API key factories, and OpenAI-compatible base URLs such as OpenRouter.
 
 Usage:
 - `model` / `messages` can be values or `(blackboard) -> ...` factories
 - `stream`: bool or `(blackboard) -> bool`; `stream_on_delta` supports sync/async callbacks
 - `api_key`: string or factory `(blackboard)` / `(blackboard, model)`
-- Tracer records tokens/cost when available
+- `openrouter/<model>` is accepted as a shorthand for OpenRouter's OpenAI-compatible API
+- Tracer records tokens when the provider returns usage, and cost when response metadata exposes it
 
 ```python
 tree = (
     Tree()
     .Sequence()
-    ._().LLM("openrouter/openai/gpt-4.1-mini", [{"role": "user", "content": "hi"}])
+    ._().LLM("gpt-4.1-mini", [{"role": "user", "content": "hi"}])
     .End()
 )
 ```

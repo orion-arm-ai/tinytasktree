@@ -117,13 +117,6 @@ build and run within the same thread.
 ### Environments
 
 * DISABLE_TASKTREE_LOGGING=1 disables internal tasktree logging.
-* DISABLE_LITE_LLM_LOGGING=1 disables LiteLLM logging (sets suppress_debug_info and set_verbose).
-
-### FAQ
-
-Q: I see "coroutine 'close_litellm_async_clients' was never awaited" warnings. Is it a bug?
-A: This comes from LiteLLM async client cleanup on process exit. If it bothers you,
-   call `await litellm.close_litellm_async_clients()` before exiting your program.
 
 ### License
 
@@ -163,14 +156,9 @@ from typing import (
 )
 
 import json_repair
-import litellm
+from openai import AsyncOpenAI
 import orjson
 import redis.asyncio as async_redis
-
-_DISABLE_LITE_LLM_LOGGING = os.getenv("DISABLE_LITE_LLM_LOGGING", "").strip().lower() not in {"", "0", "false"}
-if _DISABLE_LITE_LLM_LOGGING:
-    litellm.suppress_debug_info = True
-    litellm.set_verbose = False
 
 __all__ = (
     "AnyB",
@@ -1121,6 +1109,21 @@ type LLMApiKeyFactory1[B] = Callable[[B], str | None]  # function(blackboard) =>
 type LLMApiKeyFactory2[B] = Callable[[B, str], str | None]  # function(blackboard, model_name) => api_key | None
 type LLMApiKeyFactory[B] = LLMApiKeyFactory1[B] | LLMApiKeyFactory2[B]
 
+_OPENAI_CLIENT_OPTION_KEYS = frozenset(
+    {
+        "base_url",
+        "default_headers",
+        "default_query",
+        "http_client",
+        "max_retries",
+        "organization",
+        "project",
+        "timeout",
+        "websocket_base_url",
+    }
+)
+_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
 _DEFAULT_GLOBAL_LLM_API_KEY_FACTORY: str | LLMApiKeyFactory[Any] | None = None
 _DEFAULT_GLOBAL_LLM_API_KEY_PARAMS_CNT: int = 0
 
@@ -1156,18 +1159,42 @@ type LLMStreamOnChunkCallback[B] = (
 )
 
 
+def _new_async_openai_client(**kwargs: Any) -> AsyncOpenAI:
+    return AsyncOpenAI(**kwargs)
+
+
+async def _close_openai_client(client: Any) -> None:
+    close = getattr(client, "close", None)
+    if not callable(close):
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result
+
+
 @final
 class LLMNode[B](LeafNode[B]):
     KIND: str = "LLM"
 
     @staticmethod
-    def _extract_tokens(usage: Any | None) -> dict[str, int] | None:
-        if not isinstance(usage, dict):
-            return None
+    def _obj_get(obj: Any, key: str, default: Any = None) -> Any:
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
 
-        prompt = _as_int(usage.get("prompt_tokens"))
-        completion = _as_int(usage.get("completion_tokens"))
-        total = _as_int(usage.get("total_tokens"))
+    @classmethod
+    def _extract_tokens(cls, usage: Any | None) -> dict[str, int] | None:
+        prompt = _as_int(cls._obj_get(usage, "prompt_tokens"))
+        if prompt is None:
+            prompt = _as_int(cls._obj_get(usage, "input_tokens"))
+
+        completion = _as_int(cls._obj_get(usage, "completion_tokens"))
+        if completion is None:
+            completion = _as_int(cls._obj_get(usage, "output_tokens"))
+
+        total = _as_int(cls._obj_get(usage, "total_tokens"))
         if total is None and prompt is not None and completion is not None:
             total = prompt + completion
 
@@ -1182,27 +1209,86 @@ class LLMNode[B](LeafNode[B]):
 
     @staticmethod
     def _compute_tokens(model_name: str, messages_obj: Any, output_text: str) -> dict[str, int] | None:
-        try:
-            prompt_tokens = litellm.token_counter(model=model_name, messages=messages_obj)
-        except Exception:
-            prompt_tokens = None
-        try:
-            completion_tokens = litellm.token_counter(model=model_name, text=output_text, count_response_tokens=True)
-        except Exception:
-            completion_tokens = None
-        if prompt_tokens is None and completion_tokens is None:
+        del model_name, messages_obj, output_text
+        return None
+
+    @classmethod
+    def _content_to_text(cls, content: Any) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            chunks: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    chunks.append(item)
+                    continue
+                text = cls._obj_get(item, "text")
+                if text is None:
+                    text = cls._obj_get(item, "content")
+                if isinstance(text, str):
+                    chunks.append(text)
+            return "".join(chunks)
+        return str(content)
+
+    @classmethod
+    def _extract_response_cost(cls, response: Any | None = None, usage: Any | None = None) -> float | None:
+        hidden = cls._obj_get(response, "_hidden_params")
+        if isinstance(hidden, dict):
+            value = _as_float(hidden.get("response_cost"))
+            if value is not None:
+                return value
+
+        value = _as_float(cls._obj_get(response, "response_cost"))
+        if value is not None:
+            return value
+
+        value = _as_float(cls._obj_get(usage, "response_cost"))
+        if value is not None:
+            return value
+
+        return _as_float(cls._obj_get(usage, "estimated_cost"))
+
+    @classmethod
+    def _normalize_openai_request(
+        cls,
+        *,
+        model: str,
+        api_key: str | None,
+        stream: bool,
+        llm_call_kwargs: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], str]:
+        request_model = model
+        client_kwargs: dict[str, Any] = {}
+        request_kwargs: dict[str, Any] = {}
+
+        for key, value in llm_call_kwargs.items():
+            if key in _OPENAI_CLIENT_OPTION_KEYS:
+                client_kwargs[key] = value
+            else:
+                request_kwargs[key] = value
+
+        if request_model.startswith("openrouter/"):
+            request_model = request_model.removeprefix("openrouter/")
+            client_kwargs.setdefault("base_url", _OPENROUTER_BASE_URL)
+            if api_key is None:
+                api_key = os.getenv("OPENROUTER_API_KEY")
+
+        if api_key is not None:
+            client_kwargs["api_key"] = api_key
+
+        if stream and "stream_options" not in request_kwargs and "base_url" not in client_kwargs:
+            request_kwargs["stream_options"] = {"include_usage": True}
+
+        return client_kwargs, request_kwargs, request_model
+
+    @classmethod
+    def _first_choice(cls, payload: Any) -> Any | None:
+        choices = cls._obj_get(payload, "choices") or []
+        if not choices:
             return None
-        total_tokens = None
-        if prompt_tokens is not None and completion_tokens is not None:
-            total_tokens = prompt_tokens + completion_tokens
-        tokens: dict[str, int] = {}
-        if prompt_tokens is not None:
-            tokens["prompt"] = int(prompt_tokens)
-        if completion_tokens is not None:
-            tokens["completion"] = int(completion_tokens)
-        if total_tokens is not None:
-            tokens["total"] = int(total_tokens)
-        return tokens or None
+        return choices[0]
 
     def _resolve_api_key(self, b: B, model: str) -> str | None:
         api_key_source = self._api_key if self._api_key is not None else _DEFAULT_GLOBAL_LLM_API_KEY_FACTORY
@@ -1252,33 +1338,14 @@ class LLMNode[B](LeafNode[B]):
         usage: dict[str, Any] | None = None,
         cost_reported: bool = False,
     ) -> bool:
+        del model
         if cost_reported:
             return True
         try:
-            if response is not None:
-                hidden = getattr(response, "_hidden_params", None)
-                response_cost = None
-                if hidden and "response_cost" in hidden:
-                    response_cost = hidden["response_cost"]
-                elif isinstance(response, dict):
-                    response_cost = response.get("_hidden_params", {}).get("response_cost")
-                if response_cost is None:
-                    try:
-                        response_cost = litellm.completion_cost(completion_response=response)
-                    except Exception:
-                        response_cost = None
-                if response_cost is not None:
-                    tracer.incr_cost(float(response_cost))
-                    return True
-            if usage:
-                prompt_tokens = usage.get("prompt_tokens")
-                completion_tokens = usage.get("completion_tokens")
-                if prompt_tokens is not None and completion_tokens is not None:
-                    prompt_cost, completion_cost = litellm.cost_per_token(
-                        model=model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
-                    )
-                    tracer.incr_cost(float(prompt_cost) + float(completion_cost))
-                    return True
+            response_cost = self._extract_response_cost(response=response, usage=usage)
+            if response_cost is not None:
+                tracer.incr_cost(response_cost)
+                return True
         except Exception:
             return False
         return False
@@ -1336,39 +1403,59 @@ class LLMNode[B](LeafNode[B]):
             tracer.update_attributes(api_key="***")
 
         finish_reason: str = ""
-        kwargs: dict[str, Any] = {"model": model, "messages": messages, "stream": stream}
-        if api_key is not None:
-            kwargs["api_key"] = api_key
-        kwargs.update(self._llm_call_kwargs or {})
-        response = await litellm.acompletion(**kwargs)
+        client_kwargs, request_kwargs, request_model = self._normalize_openai_request(
+            model=model,
+            api_key=api_key,
+            stream=stream,
+            llm_call_kwargs=self._llm_call_kwargs,
+        )
+        if api_key is None and "api_key" in client_kwargs:
+            tracer.update_attributes(api_key="***")
+        request_kwargs.update({"model": request_model, "messages": messages, "stream": stream})
+        client = _new_async_openai_client(**client_kwargs)
+        try:
+            response = await client.chat.completions.create(**request_kwargs)
 
-        cost_reported = False
+            cost_reported = False
 
-        if stream:
-            async for chunk in response:
-                choices = chunk.get("choices") or []
-                cost_reported = self._try_record_cost(
-                    tracer=tracer, model=model, usage=chunk.get("usage"), cost_reported=cost_reported
-                )
-                tokens = self._extract_tokens(chunk.get("usage"))
-                if tokens is not None:
-                    last_tokens = tokens
-                if choices:
-                    delta = choices[0]["delta"]
-                    delta_content = delta.get("content") or ""
+            if stream:
+                async for chunk in response:
+                    usage = self._obj_get(chunk, "usage")
+                    cost_reported = self._try_record_cost(
+                        tracer=tracer, model=model, usage=usage, cost_reported=cost_reported
+                    )
+                    tokens = self._extract_tokens(usage)
+                    if tokens is not None:
+                        last_tokens = tokens
+
+                    choice = self._first_choice(chunk)
+                    if choice is None:
+                        continue
+
+                    delta = self._obj_get(choice, "delta")
+                    delta_content = self._content_to_text(self._obj_get(delta, "content"))
                     output += delta_content
-                    fr = choices[0].get("finish_reason")
+                    fr = self._obj_get(choice, "finish_reason")
                     if fr is not None:
-                        finish_reason = fr
+                        finish_reason = str(fr)
                     await self._call_stream_delta_callback(b, output, delta_content, False, finish_reason)
-            await self._call_stream_delta_callback(b, output, "", True, finish_reason)
-        else:
-            output = response["choices"][0]["message"]["content"]
-            finish_reason = response["choices"][0].get("finish_reason")
-            cost_reported = self._try_record_cost(
-                tracer=tracer, model=model, response=response, usage=response.get("usage"), cost_reported=cost_reported
-            )
-            last_tokens = self._extract_tokens(response.get("usage"))
+                await self._call_stream_delta_callback(b, output, "", True, finish_reason)
+            else:
+                choice = self._first_choice(response)
+                if choice is not None:
+                    message = self._obj_get(choice, "message")
+                    output = self._content_to_text(self._obj_get(message, "content"))
+                    fr = self._obj_get(choice, "finish_reason")
+                    if fr is not None:
+                        finish_reason = str(fr)
+
+                usage = self._obj_get(response, "usage")
+                cost_reported = self._try_record_cost(
+                    tracer=tracer, model=model, response=response, usage=usage, cost_reported=cost_reported
+                )
+                last_tokens = self._extract_tokens(usage)
+        finally:
+            await _close_openai_client(client)
 
         tracer.update_attributes(output=output)
         tracer.update_attributes(finish_reason=finish_reason)
@@ -2408,7 +2495,9 @@ class Tree[B](_ForwardingChildNode[B]):
         """
         Invokes an LLM (Large Language Model).
 
-        Based on LiteLLM: https://docs.litellm.ai/docs
+        Uses `openai-python` chat completions under the hood.
+        `openrouter/<model>` is accepted as a shorthand and maps to OpenRouter's
+        OpenAI-compatible base URL.
 
         - Status: Returns `OK` upon successful completion.
         - Data: Returns the final output text: `OK(output_text)`.
@@ -2426,11 +2515,13 @@ class Tree[B](_ForwardingChildNode[B]):
             Resolution order:
             1) `api_key` passed to this node
             2) `set_default_llm_api_key_factory()`
-            3) Environment variables (LiteLLM)
+            3) Environment variables (`OPENROUTER_API_KEY` for `openrouter/...`,
+               otherwise `openai-python`'s default resolution such as `OPENAI_API_KEY`)
             4) None
         :param name: Optional name for the node.
-        :param llm_call_kwargs: Any other keyword arguments supported by `litellm.acompletion`
-            such as `reasoning_effort`, `max_tokens`, `temperature`
+        :param llm_call_kwargs: Extra keyword arguments forwarded to
+            `AsyncOpenAI().chat.completions.create(...)`. Selected client options such as
+            `base_url`, `timeout`, `max_retries`, `organization`, and `project` are also accepted.
 
         Example::
 
@@ -3066,6 +3157,16 @@ def _as_int(value: Any) -> int | None:
         return None
     try:
         num = int(value)
+    except Exception:
+        return None
+    return num
+
+
+def _as_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        num = float(value)
     except Exception:
         return None
     return num

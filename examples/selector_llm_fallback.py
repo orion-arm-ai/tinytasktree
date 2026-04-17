@@ -10,15 +10,11 @@ import sys
 from dataclasses import dataclass
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # ensure tinytasktree is importable
-import litellm
 
 from tinytasktree import JSON, Context, FileTraceStorageHandler, Tree
 
-litellm.suppress_debug_info = True
-litellm.set_verbose = False
-
 # Requirements:
-#   - OPENROUTER_API_KEY set for OpenRouter access via LiteLLM
+#   - OPENROUTER_API_KEY set for OpenRouter access via openai-python compatibility
 
 
 @dataclass

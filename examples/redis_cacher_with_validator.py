@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # e
 from tinytasktree import JSON, Context, FileTraceStorageHandler, Tree, set_default_global_redis_client
 
 # Requirements:
-#   - OPENROUTER_API_KEY set for OpenRouter access via LiteLLM
+#   - OPENROUTER_API_KEY set for OpenRouter access via openai-python compatibility
 #   - Redis running and REDIS_URL set (default: redis://127.0.0.1:6379)
 
 PROMPT_VERSION = "v1"

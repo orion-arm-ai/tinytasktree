@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from tinytasktree import JSON, Context, FileTraceStorageHandler, Tree
 
-# Running this example requires setting OS ENV variable `OPENROUTER_API_KEY`.
+# Running this example requires setting `OPENROUTER_API_KEY` or `OPENAI_API_KEY`.
 
 
 @dataclass

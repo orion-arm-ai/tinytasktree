@@ -7,7 +7,7 @@ Steps:
 Expectations:
 - LLM returns OK with expected content.
 - Token and cost stats are recorded on the tracer.
-- API key resolution passes through to LiteLLM and tracer attributes are set.
+- API key resolution passes through to the OpenAI client and tracer attributes are set.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def make_messages(b: Blackboard) -> list[tinytasktree.JSON]:
     return [{"role": "user", "content": b.prompt}]
 
 
-async def test_llm_basic_non_stream_stats(mock_litellm):
+async def test_llm_basic_non_stream_stats(mock_openai):
     recorded = {}
 
     async def handler(**kwargs):
@@ -49,7 +49,7 @@ async def test_llm_basic_non_stream_stats(mock_litellm):
             "_hidden_params": {"response_cost": 1.23},
         }
 
-    mock_litellm(handler=handler)
+    mock_openai(handler=handler)
 
     # fmt: off
     tree = (
@@ -70,6 +70,7 @@ async def test_llm_basic_non_stream_stats(mock_litellm):
     assert recorded["model"] == "mock/basic"
     assert recorded["messages"] == [{"role": "user", "content": "hi"}]
     assert recorded["stream"] is False
+    assert recorded["client_kwargs"] == {}
 
     trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
     assert trace.attributes["tokens"] == {"prompt": 4, "completion": 2, "total": 6}
@@ -79,7 +80,7 @@ async def test_llm_basic_non_stream_stats(mock_litellm):
     assert trace.cost == pytest.approx(1.23)
 
 
-async def test_llm_api_key_resolution(mock_litellm):
+async def test_llm_api_key_resolution(mock_openai):
     recorded = {}
 
     async def handler(**kwargs):
@@ -90,7 +91,7 @@ async def test_llm_api_key_resolution(mock_litellm):
             "_hidden_params": {"response_cost": 0.0},
         }
 
-    mock_litellm(handler=handler)
+    mock_openai(handler=handler)
 
     try:
         tinytasktree.set_default_llm_api_key_factory(lambda b: "default-key")
@@ -109,7 +110,7 @@ async def test_llm_api_key_resolution(mock_litellm):
         async with context.using_blackboard(blackboard):
             result = await tree_default(context)
         assert result.is_ok()
-        assert recorded.get("api_key") == "default-key"
+        assert recorded["client_kwargs"].get("api_key") == "default-key"
         trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
         assert trace.attributes["api_key"] == "***"
 
@@ -129,14 +130,14 @@ async def test_llm_api_key_resolution(mock_litellm):
         async with context.using_blackboard(blackboard):
             result = await tree_node_key(context)
         assert result.is_ok()
-        assert recorded.get("api_key") == "node-key"
+        assert recorded["client_kwargs"].get("api_key") == "node-key"
         trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
         assert trace.attributes["api_key"] == "***"
     finally:
         tinytasktree.set_default_llm_api_key_factory(None)
 
 
-async def test_llm_streaming_tokens(mock_litellm):
+async def test_llm_streaming_tokens(mock_openai):
     async def handler(**kwargs):
         assert kwargs.get("stream") is True
 
@@ -152,7 +153,7 @@ async def test_llm_streaming_tokens(mock_litellm):
 
         return gen()
 
-    mock_litellm(handler=handler)
+    mock_openai(handler=handler)
 
     # fmt: off
     tree = (
