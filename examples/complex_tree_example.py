@@ -15,7 +15,9 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # e
 from tinytasktree import JSON, Context, FileTraceStorageHandler, Result, Tree
 
 # Requirements:
-#   - OPENROUTER_API_KEY set for OpenRouter access via openai-python compatibility
+#   - OPENROUTER_BASE_URL and OPENROUTER_API_KEY set for OpenRouter access
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 
 @dataclass
@@ -79,7 +81,7 @@ summary_tree = (
     Tree[Blackboard]("SummaryTree")
     .Sequence()
     ._().Log("Summary branch")
-    ._().LLM("openrouter/openai/gpt-5-nano", make_summary_messages)
+    ._().LLM("openai/gpt-5-nano", make_summary_messages, base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
     ._().WriteBlackboard("summary")
     ._().Log(lambda b: f"Summary length: {len(b.summary)}")
     .End()
@@ -101,7 +103,7 @@ guess_tree = (
     Tree[Blackboard]("GuessTree")
     .Retry(3, sleep_secs=1)
     ._().Sequence()
-    ._()._().LLM("openrouter/openai/gpt-5-nano", make_guess_messages)
+    ._()._().LLM("openai/gpt-5-nano", make_guess_messages, base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
     ._()._().ParseJSON(dst="guess_json")
     ._()._().Function(validate_guess)
     .End()
@@ -110,7 +112,7 @@ guess_tree = (
 title_tree_a = (
     Tree[Blackboard]("TitleA")
     .Sequence()
-    ._().LLM("openrouter/openai/gpt-5-nano", make_title_messages)
+    ._().LLM("openai/gpt-5-nano", make_title_messages, base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
     ._().WriteBlackboard("title")
     .End()
 )
@@ -118,7 +120,7 @@ title_tree_a = (
 title_tree_b = (
     Tree[Blackboard]("TitleB")
     .Sequence()
-    ._().LLM("openrouter/google/gemma-3-27b-it:free", make_title_messages)
+    ._().LLM("google/gemma-3-27b-it:free", make_title_messages, base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
     ._().WriteBlackboard("title")
     .End()
 )
@@ -126,7 +128,7 @@ title_tree_b = (
 title_tree_c = (
     Tree[Blackboard]("TitleC")
     .Sequence()
-    ._().LLM("openrouter/meta-llama/llama-3.1-8b-instruct:free", make_title_messages)
+    ._().LLM("meta-llama/llama-3.1-8b-instruct:free", make_title_messages, base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
     ._().WriteBlackboard("title")
     .End()
 )

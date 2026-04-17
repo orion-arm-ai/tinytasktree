@@ -14,7 +14,9 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # e
 from tinytasktree import JSON, Context, FileTraceStorageHandler, Result, Tree
 
 # Requirements:
-#   - OPENROUTER_API_KEY set for OpenRouter access via openai-python compatibility
+#   - OPENROUTER_BASE_URL and OPENROUTER_API_KEY set for OpenRouter access
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 
 @dataclass
@@ -40,7 +42,7 @@ tree = (
     Tree[Blackboard]("TimeoutLLM")
     .Sequence()
     ._().Timeout(2)
-    ._()._().LLM("openrouter/openai/gpt-4.1-mini", make_messages)
+    ._()._().LLM("openai/gpt-4.1-mini", make_messages, base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
     ._()._().Fallback()
     ._()._()._().Function(on_timeout)
     ._().WriteBlackboard(write_response)

@@ -18,8 +18,10 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # e
 from tinytasktree import JSON, Context, FileTraceStorageHandler, Result, Tree
 
 # Requirements:
-#   - OPENROUTER_API_KEY set for OpenRouter access via openai-python compatibility
+#   - OPENROUTER_BASE_URL and OPENROUTER_API_KEY set for OpenRouter access
 #   - Redis running and REDIS_URL set (default: redis://127.0.0.1:6379)
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 
 @dataclass
@@ -63,7 +65,7 @@ tree = (
     Tree[Blackboard]("TerminableLLM")
     .Terminable(cancel_key, redis)
     ._().Sequence()
-    ._()._().LLM("openrouter/google/gemma-3-27b-it:free", make_messages, stream=True, stream_on_delta=on_delta)
+    ._()._().LLM("google/gemma-3-27b-it:free", make_messages, stream=True, stream_on_delta=on_delta, base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
     ._()._().WriteBlackboard(write_response)
     ._().Fallback()
     ._()._().Function(on_cancelled)

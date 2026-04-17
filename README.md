@@ -380,7 +380,7 @@ Usage:
 - `model` / `messages` can be values or `(blackboard) -> ...` factories
 - `stream`: bool or `(blackboard) -> bool`; `stream_on_delta` supports sync/async callbacks
 - `api_key`: string or factory `(blackboard)` / `(blackboard, model)`
-- `openrouter/<model>` is accepted as a shorthand for OpenRouter's OpenAI-compatible API
+- `base_url`: string or `(blackboard) -> str | None` for OpenAI-compatible providers
 - Tracer records tokens when the provider returns usage, and cost when response metadata exposes it
 
 ```python
@@ -395,6 +395,9 @@ tree = (
 Streaming response example:
 
 ```python
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+
 def on_delta(b, full, delta, done, reason=""):
     if delta:
         print(delta, end="")
@@ -402,7 +405,14 @@ def on_delta(b, full, delta, done, reason=""):
 tree = (
     Tree()
     .Sequence()
-    ._().LLM(lambda b: b.model, lambda b: b.messages, stream=True, stream_on_delta=on_delta)
+    ._().LLM(
+        lambda b: b.model,
+        lambda b: b.messages,
+        stream=True,
+        stream_on_delta=on_delta,
+        base_url=lambda b: b.base_url or OPENROUTER_BASE_URL,
+        api_key=OPENROUTER_API_KEY,
+    )
     .End()
 )
 ```

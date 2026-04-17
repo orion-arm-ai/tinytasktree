@@ -13,7 +13,9 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # e
 from tinytasktree import JSON, Context, FileTraceStorageHandler, Result, Tree
 
 # Requirements:
-#   - OPENROUTER_API_KEY set for OpenRouter access via openai-python compatibility
+#   - OPENROUTER_BASE_URL and OPENROUTER_API_KEY set for OpenRouter access
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 
 @dataclass
@@ -68,7 +70,14 @@ tree = (
     ._().Function(init_problem)
     ._().Retry(5, sleep_secs=1)  # Up to 5 attempts
     ._()._().Sequence()
-    ._()._()._().LLM("openrouter/openai/gpt-5-nano", make_messages, stream=True, stream_on_delta=on_delta)
+    ._()._()._().LLM(
+        "openai/gpt-5-nano",
+        make_messages,
+        stream=True,
+        stream_on_delta=on_delta,
+        base_url=OPENROUTER_BASE_URL,
+        api_key=OPENROUTER_API_KEY,
+    )
     ._()._()._().ParseJSON(dst="parsed")
     ._()._()._().Function(validate_answer)
     .End()

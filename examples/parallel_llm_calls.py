@@ -14,7 +14,9 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # e
 from tinytasktree import JSON, Context, FileTraceStorageHandler, Tree
 
 # Requirements:
-#   - OPENROUTER_API_KEY set for OpenRouter access via openai-python compatibility
+#   - OPENROUTER_BASE_URL and OPENROUTER_API_KEY set for OpenRouter access
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 
 @dataclass
@@ -58,13 +60,13 @@ tree = (
     Tree[Blackboard]("ParallelLLM")
     .Parallel(concurrency_limit=3)
     ._().Sequence()
-    ._()._().LLM("openrouter/google/gemma-3-27b-it:free", make_messages_1)
+    ._()._().LLM("google/gemma-3-27b-it:free", make_messages_1, base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
     ._()._().WriteBlackboard(write_response_1)
     ._().Sequence()
-    ._()._().LLM("openrouter/google/gemma-3-27b-it:free", make_messages_2)
+    ._()._().LLM("google/gemma-3-27b-it:free", make_messages_2, base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
     ._()._().WriteBlackboard(write_response_2)
     ._().Sequence()
-    ._()._().LLM("openrouter/google/gemma-3-27b-it:free", make_messages_3)
+    ._()._().LLM("google/gemma-3-27b-it:free", make_messages_3, base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
     ._()._().WriteBlackboard(write_response_3)
     .End()
 )

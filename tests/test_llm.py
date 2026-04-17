@@ -22,6 +22,7 @@ import tinytasktree
 @dataclass
 class Blackboard:
     prompt: str
+    base_url: str | None = None
 
 
 def _find_first_trace_by_kind(root: tinytasktree.TraceNode, kind: str) -> tinytasktree.TraceNode:
@@ -135,6 +136,41 @@ async def test_llm_api_key_resolution(mock_openai):
         assert trace.attributes["api_key"] == "***"
     finally:
         tinytasktree.set_default_llm_api_key_factory(None)
+
+
+async def test_llm_base_url_factory_keeps_model_independent(mock_openai):
+    recorded = {}
+
+    async def handler(**kwargs):
+        recorded.update(kwargs)
+        return {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "_hidden_params": {"response_cost": 0.0},
+        }
+
+    mock_openai(handler=handler)
+
+    # fmt: off
+    tree = (
+        tinytasktree.Tree[Blackboard]("LLMBaseURL")
+        .Sequence()
+        ._().LLM("openai/gpt-4.1-mini", make_messages, base_url=lambda b: b.base_url)
+        .End()
+    )
+    # fmt: on
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="hi", base_url="https://openrouter.ai/api/v1")
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert result.is_ok()
+    assert recorded["model"] == "openai/gpt-4.1-mini"
+    assert recorded["client_kwargs"].get("base_url") == "https://openrouter.ai/api/v1"
+
+    trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
+    assert trace.attributes["base_url"] == "https://openrouter.ai/api/v1"
 
 
 async def test_llm_streaming_tokens(mock_openai):

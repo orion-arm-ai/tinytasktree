@@ -15,8 +15,10 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # e
 from tinytasktree import JSON, Context, FileTraceStorageHandler, Tree, set_default_global_redis_client
 
 # Requirements:
-#   - OPENROUTER_API_KEY set for OpenRouter access via openai-python compatibility
+#   - OPENROUTER_BASE_URL and OPENROUTER_API_KEY set for OpenRouter access
 #   - Redis running and REDIS_URL set (default: redis://127.0.0.1:6379)
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 PROMPT_VERSION = "v1"
 
@@ -46,7 +48,7 @@ tree = (
     Tree[Blackboard]("RedisCacherValidator")
     .RedisCacher(key_func=cache_key, expiration=60, value_validator=cache_validator)
     ._().Sequence()
-    ._()._().LLM("openrouter/openai/gpt-4.1-mini", make_messages)
+    ._()._().LLM("openai/gpt-4.1-mini", make_messages, base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
     ._()._().WriteBlackboard("response")
     .End()
 )

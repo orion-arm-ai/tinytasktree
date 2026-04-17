@@ -14,7 +14,9 @@ from dataclasses import dataclass
 
 from tinytasktree import JSON, Context, FileTraceStorageHandler, Tree
 
-# Running this example requires setting `OPENROUTER_API_KEY` or `OPENAI_API_KEY`.
+# Running this example requires setting `OPENROUTER_BASE_URL` and `OPENROUTER_API_KEY`.
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 
 @dataclass
@@ -39,7 +41,14 @@ def on_delta(b: Blackboard, fulltext: str, delta: str, finished: bool) -> None:
 tree = (
     Tree[Blackboard]("HelloWorld")
     .Sequence()
-    ._().LLM("openrouter/google/gemini-2.5-flash-lite", make_messages, stream=True, stream_on_delta=on_delta)
+    ._().LLM(
+        "google/gemini-2.5-flash-lite",
+        make_messages,
+        stream=True,
+        stream_on_delta=on_delta,
+        base_url=OPENROUTER_BASE_URL,
+        api_key=OPENROUTER_API_KEY,
+    )
     ._().WriteBlackboard(write_response)
     .End()
 )

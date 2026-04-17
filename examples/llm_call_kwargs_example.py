@@ -14,7 +14,9 @@ from dataclasses import dataclass
 
 from tinytasktree import Context, FileTraceStorageHandler, Tree
 
-# Running this example requires setting `OPENROUTER_API_KEY` or `OPENAI_API_KEY`.
+# Running this example requires setting `OPENROUTER_BASE_URL` and `OPENROUTER_API_KEY`.
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 
 @dataclass
@@ -35,7 +37,15 @@ def make_messages(b: Blackboard) -> list[dict]:
 tree = (
     Tree[Blackboard]("LLMCallKwargs")
     .Sequence()
-    ._().LLM("openrouter/openai/gpt-4.1-mini", make_messages, temperature=0.2, max_tokens=128, top_p=0.9)
+    ._().LLM(
+        "openai/gpt-4.1-mini",
+        make_messages,
+        base_url=OPENROUTER_BASE_URL,
+        api_key=OPENROUTER_API_KEY,
+        temperature=0.2,
+        max_tokens=128,
+        top_p=0.9,
+    )
     ._().WriteBlackboard(write_response)
     .End()
 )

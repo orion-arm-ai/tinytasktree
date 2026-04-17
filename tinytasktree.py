@@ -21,10 +21,20 @@ Example::
     def on_delta(b: Blackboard, fulltext: str, delta: str, finished: bool) -> None:
         print(delta, end="")
 
+    OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL")
+    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+
     tree = (
         Tree[Blackboard]("HelloWorld")
         .Sequence()
-        ._().LLM("openrouter/google/gemma-3-27b-it:free", make_messages, stream=True, stream_on_delta=on_delta)
+        ._().LLM(
+            "google/gemma-3-27b-it:free",
+            make_messages,
+            stream=True,
+            stream_on_delta=on_delta,
+            base_url=OPENROUTER_BASE_URL,
+            api_key=OPENROUTER_API_KEY,
+        )
         ._().WriteBlackboard(write_response)
         .End()
     )
@@ -1104,6 +1114,7 @@ class ParseJSON[B](LeafNode[B]):
 type LLMModelFactory[B] = Callable[[B], str]  # function(blackboard) => model
 type LLMMessagesFactory[B] = Callable[[B], list[JSON]]  # function(blackboard) => messages
 type LLMStreamFactory[B] = Callable[[B], bool]  # function(blackboard) => stream (bool)
+type LLMBaseURLFactory[B] = Callable[[B], str | None]  # function(blackboard) => base_url | None
 
 type LLMApiKeyFactory1[B] = Callable[[B], str | None]  # function(blackboard) => api_key | None
 type LLMApiKeyFactory2[B] = Callable[[B, str], str | None]  # function(blackboard, model_name) => api_key | None
@@ -1111,7 +1122,6 @@ type LLMApiKeyFactory[B] = LLMApiKeyFactory1[B] | LLMApiKeyFactory2[B]
 
 _OPENAI_CLIENT_OPTION_KEYS = frozenset(
     {
-        "base_url",
         "default_headers",
         "default_query",
         "http_client",
@@ -1122,7 +1132,6 @@ _OPENAI_CLIENT_OPTION_KEYS = frozenset(
         "websocket_base_url",
     }
 )
-_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 _DEFAULT_GLOBAL_LLM_API_KEY_FACTORY: str | LLMApiKeyFactory[Any] | None = None
 _DEFAULT_GLOBAL_LLM_API_KEY_PARAMS_CNT: int = 0
@@ -1256,10 +1265,10 @@ class LLMNode[B](LeafNode[B]):
         *,
         model: str,
         api_key: str | None,
+        base_url: str | None,
         stream: bool,
         llm_call_kwargs: dict[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any], str]:
-        request_model = model
         client_kwargs: dict[str, Any] = {}
         request_kwargs: dict[str, Any] = {}
 
@@ -1269,11 +1278,8 @@ class LLMNode[B](LeafNode[B]):
             else:
                 request_kwargs[key] = value
 
-        if request_model.startswith("openrouter/"):
-            request_model = request_model.removeprefix("openrouter/")
-            client_kwargs.setdefault("base_url", _OPENROUTER_BASE_URL)
-            if api_key is None:
-                api_key = os.getenv("OPENROUTER_API_KEY")
+        if base_url is not None:
+            client_kwargs["base_url"] = base_url
 
         if api_key is not None:
             client_kwargs["api_key"] = api_key
@@ -1281,7 +1287,7 @@ class LLMNode[B](LeafNode[B]):
         if stream and "stream_options" not in request_kwargs and "base_url" not in client_kwargs:
             request_kwargs["stream_options"] = {"include_usage": True}
 
-        return client_kwargs, request_kwargs, request_model
+        return client_kwargs, request_kwargs, model
 
     @classmethod
     def _first_choice(cls, payload: Any) -> Any | None:
@@ -1303,6 +1309,14 @@ class LLMNode[B](LeafNode[B]):
             raise TasktreeProgrammingError(f"{self.fullname}: api_key factory params count invalid")
         return api_key_source
 
+    def _resolve_base_url(self, b: B) -> str | None:
+        base_url_source = self._base_url
+        if callable(base_url_source):
+            if self._base_url_params_cnt == 1:
+                return cast(LLMBaseURLFactory[B], base_url_source)(b)
+            raise TasktreeProgrammingError(f"{self.fullname}: base_url factory params count invalid")
+        return base_url_source
+
     def __init__(
         self,
         model: str | LLMModelFactory[B],
@@ -1311,6 +1325,7 @@ class LLMNode[B](LeafNode[B]):
         stream_on_delta: LLMStreamOnChunkCallback[B] | None = None,
         api_key: str | LLMApiKeyFactory[B] | None = None,
         name: str = "",
+        base_url: str | LLMBaseURLFactory[B] | None = None,
         **llm_call_kwargs,
     ) -> None:
         LeafNode.__init__(self, name)
@@ -1319,14 +1334,18 @@ class LLMNode[B](LeafNode[B]):
         self._stream = stream
         self._stream_on_delta = stream_on_delta
         self._api_key = api_key
+        self._base_url = base_url
         self._is_stream_on_delta_async = False
         self._stream_on_delta_params_cnt = 4
         self._api_key_params_cnt = 0
+        self._base_url_params_cnt = 0
         if stream_on_delta:
             self._is_stream_on_delta_async = inspect.iscoroutinefunction(stream_on_delta)
             self._stream_on_delta_params_cnt = _inspect_func_parameters_count(stream_on_delta)
         if callable(api_key):
             self._api_key_params_cnt = _inspect_func_parameters_count(api_key)
+        if callable(base_url):
+            self._base_url_params_cnt = _inspect_func_parameters_count(base_url)
         self._llm_call_kwargs = llm_call_kwargs
 
     def _try_record_cost(
@@ -1361,6 +1380,10 @@ class LLMNode[B](LeafNode[B]):
             assert self._api_key_params_cnt in {1, 2}, TasktreeProgrammingError(
                 f"{self.fullname}: api_key factory params count invalid"
             )
+        if callable(self._base_url):
+            assert self._base_url_params_cnt == 1, TasktreeProgrammingError(
+                f"{self.fullname}: base_url factory params count invalid"
+            )
         if self._api_key is None and callable(_DEFAULT_GLOBAL_LLM_API_KEY_FACTORY):
             assert _DEFAULT_GLOBAL_LLM_API_KEY_PARAMS_CNT in {1, 2}, TasktreeProgrammingError(
                 f"{self.fullname}: default api_key factory params count invalid"
@@ -1392,6 +1415,7 @@ class LLMNode[B](LeafNode[B]):
         messages = self._messages(b) if callable(self._messages) else self._messages
         stream = self._stream(b) if callable(self._stream) else self._stream
         api_key = self._resolve_api_key(b, model)
+        base_url = self._resolve_base_url(b)
         output = ""
         last_tokens: dict[str, int] | None = None
 
@@ -1401,11 +1425,14 @@ class LLMNode[B](LeafNode[B]):
         tracer.update_attributes(**self._llm_call_kwargs)
         if api_key is not None:
             tracer.update_attributes(api_key="***")
+        if base_url is not None:
+            tracer.update_attributes(base_url=base_url)
 
         finish_reason: str = ""
         client_kwargs, request_kwargs, request_model = self._normalize_openai_request(
             model=model,
             api_key=api_key,
+            base_url=base_url,
             stream=stream,
             llm_call_kwargs=self._llm_call_kwargs,
         )
@@ -2490,14 +2517,13 @@ class Tree[B](_ForwardingChildNode[B]):
         stream_on_delta: LLMStreamOnChunkCallback[B] | None = None,
         api_key: str | LLMApiKeyFactory[B] | None = None,
         name: str = "",
+        base_url: str | LLMBaseURLFactory[B] | None = None,
         **llm_call_kwargs,
     ) -> Self:
         """
         Invokes an LLM (Large Language Model).
 
         Uses `openai-python` chat completions under the hood.
-        `openrouter/<model>` is accepted as a shorthand and maps to OpenRouter's
-        OpenAI-compatible base URL.
 
         - Status: Returns `OK` upon successful completion.
         - Data: Returns the final output text: `OK(output_text)`.
@@ -2515,23 +2541,25 @@ class Tree[B](_ForwardingChildNode[B]):
             Resolution order:
             1) `api_key` passed to this node
             2) `set_default_llm_api_key_factory()`
-            3) Environment variables (`OPENROUTER_API_KEY` for `openrouter/...`,
-               otherwise `openai-python`'s default resolution such as `OPENAI_API_KEY`)
+            3) `openai-python`'s default resolution such as `OPENAI_API_KEY`
             4) None
+        :param base_url: Optional base URL string or a factory function `f(blackboard) -> str | None`.
+            Use this for OpenAI-compatible providers such as OpenRouter while keeping `model`
+            independent from the transport endpoint.
         :param name: Optional name for the node.
         :param llm_call_kwargs: Extra keyword arguments forwarded to
             `AsyncOpenAI().chat.completions.create(...)`. Selected client options such as
-            `base_url`, `timeout`, `max_retries`, `organization`, and `project` are also accepted.
+            `timeout`, `max_retries`, `organization`, and `project` are also accepted.
 
         Example::
 
             Tree()
             .Sequence()
-            ._().LLM("openrouter/openai/gpt-4.1-mini", [{"role": "user", "content": "Hello!"}], stream=True, stream_on_delta=lambda b, text, delta, finished: print(delta, end=""))
+            ._().LLM("openai/gpt-4.1-mini", [{"role": "user", "content": "Hello!"}], stream=True, stream_on_delta=lambda b, text, delta, finished: print(delta, end=""), base_url=lambda b: b.base_url)
             ._().WriteBlackboard("ai_response")
             .End()
         """
-        return self._attach(LLMNode[B](model, messages, stream, stream_on_delta, api_key, name, **llm_call_kwargs))
+        return self._attach(LLMNode[B](model, messages, stream, stream_on_delta, api_key, name, base_url, **llm_call_kwargs))
 
     def Subtree[B1](
         self,
