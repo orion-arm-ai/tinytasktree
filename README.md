@@ -62,7 +62,6 @@ async def main():
 - Python 3.13+
 - openai-python (only needed for `LLM` nodes)
 - An async key-value store backend is only needed for `Cacher` and `Terminable` nodes
-- Uvicorn (only needed for the HTTP trace server)
 
 ## Features
 
