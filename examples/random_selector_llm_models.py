@@ -16,9 +16,9 @@ from tinytasktree import JSON, Context, FileTraceStorageHandler, LLMModel, LLMPr
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY")
 PROVIDER = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
-MODEL_A = LLMModel("qwen/qwen3.5-35b-a3b", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
-MODEL_B = LLMModel("qwen/qwen3.5-35b-a3b", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
-MODEL_C = LLMModel("qwen/qwen3.5-35b-a3b", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
+MODEL_A = LLMModel("qwen/qwen3.5-35b-a3b", provider=PROVIDER, extra_body={"reasoning": {"enabled": False}})
+MODEL_B = LLMModel("qwen/qwen3.5-35b-a3b", provider=PROVIDER, extra_body={"reasoning": {"enabled": False}})
+MODEL_C = LLMModel("qwen/qwen3.5-35b-a3b", provider=PROVIDER, extra_body={"reasoning": {"enabled": False}})
 
 
 @dataclass

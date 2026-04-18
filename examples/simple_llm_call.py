@@ -21,7 +21,7 @@ PROVIDER = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
 MODEL = LLMModel(
     "qwen/qwen-plus",
     provider=PROVIDER,
-    llm_call_kwargs={"reasoning": {"enabled": False}},
+    extra_body={"reasoning": {"enabled": False}},
     input_price_per_m=0.325,
     output_price_per_m=1.95,
 )

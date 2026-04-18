@@ -22,7 +22,13 @@ from tinytasktree import JSON, Context, FileTraceStorageHandler, LLMModel, LLMPr
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY")
 PROVIDER = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
-MODEL = LLMModel("qwen/qwen3.6-plus", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
+MODEL = LLMModel(
+    "qwen/qwen3.6-plus",
+    provider=PROVIDER,
+    extra_body={"reasoning": {"enabled": False}},
+    input_price_per_m=0.325,
+    output_price_per_m=1.95,
+)
 
 PROMPT_VERSION = "v1"
 

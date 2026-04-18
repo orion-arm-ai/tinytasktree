@@ -1,7 +1,8 @@
-"""LLM call with extra kwargs forwarded to openai-python.
+"""LLM call with explicit OpenAI client kwargs, request kwargs, and extra_body.
 
 Shows how to pass arbitrary keyword arguments (e.g. temperature, max_tokens)
-through Tree.LLM via **llm_call_kwargs.
+through `Tree.LLM`, while provider-specific request extensions go through
+`extra_body`.
 """
 
 import os
@@ -21,8 +22,8 @@ PROVIDER = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
 MODEL = LLMModel(
     "qwen/qwen3.6-plus",
     provider=PROVIDER,
+    extra_body={"reasoning": {"enabled": False}},
     llm_call_kwargs={
-        "reasoning": {"enabled": False},
         "temperature": 0.2,
         "max_tokens": 128,
         "top_p": 0.9,

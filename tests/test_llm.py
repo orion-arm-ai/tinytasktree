@@ -189,13 +189,15 @@ async def test_llm_model_provider_supplies_transport_and_kwargs(mock_openai):
     provider = tinytasktree.LLMProvider(
         base_url="https://provider.example/v1",
         api_key="provider-key",
-        llm_call_kwargs={"reasoning": {"enabled": False}},
+        client_kwargs={"timeout": 30},
+        extra_body={"reasoning": {"enabled": False}},
     )
     model = tinytasktree.LLMModel(
         "provider/model",
         provider=provider,
         input_price_per_m=0.5,
         output_price_per_m=1.5,
+        client_kwargs={"max_retries": 2},
         llm_call_kwargs={"temperature": 0.25},
     )
 
@@ -217,6 +219,8 @@ async def test_llm_model_provider_supplies_transport_and_kwargs(mock_openai):
     assert recorded["model"] == "provider/model"
     assert recorded["client_kwargs"].get("base_url") == "https://provider.example/v1"
     assert recorded["client_kwargs"].get("api_key") == "provider-key"
+    assert recorded["client_kwargs"].get("timeout") == 30
+    assert recorded["client_kwargs"].get("max_retries") == 2
     assert recorded["extra_body"] == {"reasoning": {"enabled": False}}
     assert recorded["temperature"] == 0.25
 
@@ -245,11 +249,14 @@ async def test_llm_node_kwargs_override_model_and_provider_defaults(mock_openai)
     provider = tinytasktree.LLMProvider(
         base_url="https://provider.example/v1",
         api_key="provider-key",
-        llm_call_kwargs={"reasoning": {"enabled": True}, "temperature": 0.1},
+        client_kwargs={"timeout": 10},
+        extra_body={"reasoning": {"enabled": True}},
+        llm_call_kwargs={"temperature": 0.1},
     )
     model = tinytasktree.LLMModel(
         "provider/model",
         provider=provider,
+        client_kwargs={"max_retries": 1},
         llm_call_kwargs={"temperature": 0.2, "max_tokens": 64},
     )
 
@@ -262,7 +269,8 @@ async def test_llm_node_kwargs_override_model_and_provider_defaults(mock_openai)
             make_messages,
             api_key="node-key",
             base_url=lambda b: b.base_url,
-            reasoning={"enabled": False},
+            client_kwargs={"timeout": 5},
+            extra_body={"reasoning": {"enabled": False}},
             temperature=0.3,
         )
         .End()
@@ -278,6 +286,8 @@ async def test_llm_node_kwargs_override_model_and_provider_defaults(mock_openai)
     assert recorded["model"] == "provider/model"
     assert recorded["client_kwargs"].get("api_key") == "node-key"
     assert recorded["client_kwargs"].get("base_url") == "https://node.example/v1"
+    assert recorded["client_kwargs"].get("timeout") == 5
+    assert recorded["client_kwargs"].get("max_retries") == 1
     assert recorded["extra_body"] == {"reasoning": {"enabled": False}}
     assert recorded["temperature"] == 0.3
     assert recorded["max_tokens"] == 64
@@ -353,7 +363,7 @@ async def test_llm_reasoning_is_forwarded_via_extra_body(mock_openai):
             "qwen/qwen3.6-plus",
             make_messages,
             base_url=lambda b: b.base_url,
-            reasoning={"enabled": False},
+            extra_body={"reasoning": {"enabled": False}},
         )
         .End()
     )

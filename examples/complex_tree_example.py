@@ -21,10 +21,10 @@ LLM_API_KEY = os.getenv("LLM_API_KEY")
 PROVIDER = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
 
 # fmt: off
-MODEL_1 = LLMModel("qwen/qwen3.6-plus", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
-MODEL_2 = LLMModel("qwen/qwen3.5-35b-a3b", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
-MODEL_3 = LLMModel("qwen/qwen3.5-27b", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
-MODEL_4 = LLMModel("qwen/qwen3.5-flash-02-23", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
+MODEL_1 = LLMModel("qwen/qwen3.6-plus", provider=PROVIDER, extra_body={"reasoning": {"enabled": False}})
+MODEL_2 = LLMModel("qwen/qwen3.5-35b-a3b", provider=PROVIDER, extra_body={"reasoning": {"enabled": False}})
+MODEL_3 = LLMModel("qwen/qwen3.5-27b", provider=PROVIDER, extra_body={"reasoning": {"enabled": False}})
+MODEL_4 = LLMModel("qwen/qwen3.5-flash-02-23", provider=PROVIDER, extra_body={"reasoning": {"enabled": False}})
 # fmt: on
 
 

@@ -40,7 +40,12 @@ def make_messages(b: Blackboard) -> list[JSON]:
 
 
 provider = LLMProvider(base_url="https://llm.example/v1", api_key="...")
-model = LLMModel("gpt-4.1-mini", provider=provider)
+model = LLMModel(
+    "gpt-4.1-mini",
+    provider=provider,
+    input_price_per_m=0.15,
+    output_price_per_m=0.60,
+)
 
 tree = (
     Tree[Blackboard]("HelloWorld")
@@ -64,7 +69,7 @@ async def main():
 
 - Python 3.13+
 - openai-python (only needed for `LLM` nodes)
-- An async key-value store backend is only needed for `Cacher` and `Terminable` nodes
+- A cache store backend is only needed for `Cacher` and `Terminable` nodes
 
 ## Features
 
@@ -411,11 +416,22 @@ Usage:
 - `stream`: bool or `(blackboard) -> bool`; `stream_on_delta` supports sync/async callbacks
 - `api_key`: string or factory `(blackboard)` / `(blackboard, model)`
 - `base_url`: string or `(blackboard) -> str | None` for OpenAI-compatible providers
-- Tracer records tokens when the provider returns usage, and cost when response metadata exposes it
+- `client_kwargs`: explicit kwargs forwarded to `AsyncOpenAI(...)`
+- `extra_body`: explicit provider-specific request body fields merged into `extra_body`
+- `**llm_call_kwargs`: regular request kwargs forwarded to `chat.completions.create(...)`
+- `LLMModel` can optionally carry `input_price_per_m` / `output_price_per_m` in USD per 1M tokens
+- Tracer records tokens when the provider returns usage
+- Cost is taken from provider metadata when available; otherwise it falls back to token usage and the `LLMModel` prices
 
 ```python
 provider = LLMProvider(base_url="https://llm.example/v1", api_key="...")
-model = LLMModel("gpt-4.1-mini", provider=provider)
+model = LLMModel(
+    "gpt-4.1-mini",
+    provider=provider,
+    extra_body={"reasoning": {"enabled": False}},
+    input_price_per_m=0.15,
+    output_price_per_m=0.60,
+)
 
 tree = (
     Tree()
@@ -434,7 +450,11 @@ from tinytasktree import LLMModel, LLMProvider, Tree
 
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY")
-provider = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
+provider = LLMProvider(
+    base_url=LLM_BASE_URL or "",
+    api_key=LLM_API_KEY,
+    client_kwargs={"timeout": 30},
+)
 
 def on_delta(b, full, delta, done, reason=""):
     if delta:
@@ -444,7 +464,9 @@ tree = (
     Tree()
     .Sequence()
     ._().LLM(lambda b: LLMModel(b.model, provider=provider), lambda b: b.messages,
-             stream=True, stream_on_delta=on_delta)
+             stream=True, stream_on_delta=on_delta,
+             extra_body={"reasoning": {"enabled": False}},
+             temperature=0.2)
     .End()
 )
 ```

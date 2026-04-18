@@ -7,6 +7,7 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 5173,
     proxy: {
+      "/traces": "http://127.0.0.1:8000",
       "/trace": "http://127.0.0.1:8000",
     },
   },

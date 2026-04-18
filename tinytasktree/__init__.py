@@ -1297,6 +1297,8 @@ class ParseJSON[B](LeafNode[B]):
 class LLMProvider:
     base_url: str
     api_key: str | None = None
+    client_kwargs: dict[str, Any] = field(default_factory=dict)
+    extra_body: dict[str, Any] = field(default_factory=dict)
     llm_call_kwargs: dict[str, Any] = field(default_factory=dict)
 
 
@@ -1306,6 +1308,8 @@ class LLMModel:
     provider: LLMProvider
     input_price_per_m: float = 0.0
     output_price_per_m: float = 0.0
+    client_kwargs: dict[str, Any] = field(default_factory=dict)
+    extra_body: dict[str, Any] = field(default_factory=dict)
     llm_call_kwargs: dict[str, Any] = field(default_factory=dict)
 
 
@@ -1318,24 +1322,6 @@ type LLMBaseURLFactory[B] = Callable[[B], str | None]  # function(blackboard) =>
 type LLMApiKeyFactory1[B] = Callable[[B], str | None]  # function(blackboard) => api_key | None
 type LLMApiKeyFactory2[B] = Callable[[B, str], str | None]  # function(blackboard, model_name) => api_key | None
 type LLMApiKeyFactory[B] = LLMApiKeyFactory1[B] | LLMApiKeyFactory2[B]
-
-_OPENAI_CLIENT_OPTION_KEYS = frozenset(
-    {
-        "default_headers",
-        "default_query",
-        "http_client",
-        "max_retries",
-        "organization",
-        "project",
-        "timeout",
-        "websocket_base_url",
-    }
-)
-_OPENAI_EXTRA_BODY_KEYS = frozenset(
-    {
-        "reasoning",
-    }
-)
 
 _DEFAULT_GLOBAL_LLM_API_KEY_FACTORY: str | LLMApiKeyFactory[Any] | None = None
 _DEFAULT_GLOBAL_LLM_API_KEY_PARAMS_CNT: int = 0
@@ -1468,24 +1454,15 @@ class LLMNode[B](LeafNode[B]):
         cls,
         *,
         model: str,
+        client_kwargs: dict[str, Any],
         api_key: str | None,
         base_url: str | None,
         stream: bool,
+        extra_body: dict[str, Any],
         llm_call_kwargs: dict[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any], str]:
-        client_kwargs: dict[str, Any] = {}
         request_kwargs: dict[str, Any] = {}
-        extra_body: dict[str, Any] = {}
-
-        for key, value in llm_call_kwargs.items():
-            if key in _OPENAI_CLIENT_OPTION_KEYS:
-                client_kwargs[key] = value
-            elif key == "extra_body" and isinstance(value, dict):
-                extra_body.update(value)
-            elif key in _OPENAI_EXTRA_BODY_KEYS:
-                extra_body[key] = value
-            else:
-                request_kwargs[key] = value
+        request_kwargs.update(llm_call_kwargs)
 
         if extra_body:
             existing_extra_body = request_kwargs.get("extra_body")
@@ -1523,16 +1500,20 @@ class LLMNode[B](LeafNode[B]):
         return merged
 
     @staticmethod
-    def _resolve_model_input(model_input: LLMResolvedModel) -> tuple[str, LLMProvider | None, float, float, dict[str, Any]]:
+    def _resolve_model_input(
+        model_input: LLMResolvedModel,
+    ) -> tuple[str, LLMProvider | None, float, float, dict[str, Any], dict[str, Any], dict[str, Any]]:
         if isinstance(model_input, LLMModel):
             return (
                 model_input.model,
                 model_input.provider,
                 float(model_input.input_price_per_m),
                 float(model_input.output_price_per_m),
+                dict(model_input.client_kwargs),
+                dict(model_input.extra_body),
                 dict(model_input.llm_call_kwargs),
             )
-        return model_input, None, 0.0, 0.0, {}
+        return model_input, None, 0.0, 0.0, {}, {}, {}
 
     @staticmethod
     def _compute_priced_cost(tokens: dict[str, int] | None, input_price_per_m: float, output_price_per_m: float) -> float | None:
@@ -1581,6 +1562,8 @@ class LLMNode[B](LeafNode[B]):
         api_key: str | LLMApiKeyFactory[B] | None = None,
         name: str = "",
         base_url: str | LLMBaseURLFactory[B] | None = None,
+        client_kwargs: dict[str, Any] | None = None,
+        extra_body: dict[str, Any] | None = None,
         **llm_call_kwargs,
     ) -> None:
         LeafNode.__init__(self, name)
@@ -1590,6 +1573,8 @@ class LLMNode[B](LeafNode[B]):
         self._stream_on_delta = stream_on_delta
         self._api_key = api_key
         self._base_url = base_url
+        self._client_kwargs = dict(client_kwargs) if client_kwargs else {}
+        self._extra_body = dict(extra_body) if extra_body else {}
         self._is_stream_on_delta_async = False
         self._stream_on_delta_params_cnt = 4
         self._api_key_params_cnt = 0
@@ -1672,9 +1657,21 @@ class LLMNode[B](LeafNode[B]):
     async def _impl(self, context: Context, tracer: Tracer) -> Result:
         b = cast(B, context._current_blackboard())
         model_input = self._model(b) if callable(self._model) else self._model
-        model, provider, input_price_per_m, output_price_per_m, model_llm_call_kwargs = self._resolve_model_input(model_input)
+        model, provider, input_price_per_m, output_price_per_m, model_client_kwargs, model_extra_body, model_llm_call_kwargs = (
+            self._resolve_model_input(model_input)
+        )
         messages = self._messages(b) if callable(self._messages) else self._messages
         stream = self._stream(b) if callable(self._stream) else self._stream
+        merged_client_kwargs = self._merge_llm_call_kwargs(
+            provider.client_kwargs if provider is not None else None,
+            model_client_kwargs,
+            self._client_kwargs,
+        )
+        merged_extra_body = self._merge_llm_call_kwargs(
+            provider.extra_body if provider is not None else None,
+            model_extra_body,
+            self._extra_body,
+        )
         merged_llm_call_kwargs = self._merge_llm_call_kwargs(
             provider.llm_call_kwargs if provider is not None else None,
             model_llm_call_kwargs,
@@ -1695,6 +1692,10 @@ class LLMNode[B](LeafNode[B]):
         tracer.update_attributes(input_price_per_m=input_price_per_m)
         tracer.update_attributes(output_price_per_m=output_price_per_m)
         tracer.update_attributes(**merged_llm_call_kwargs)
+        if merged_extra_body:
+            tracer.update_attributes(extra_body=merged_extra_body)
+            if "reasoning" in merged_extra_body:
+                tracer.update_attributes(reasoning=merged_extra_body["reasoning"])
         if api_key is not None:
             tracer.update_attributes(api_key="***")
         if base_url is not None:
@@ -1703,9 +1704,11 @@ class LLMNode[B](LeafNode[B]):
         finish_reason: str = ""
         client_kwargs, request_kwargs, request_model = self._normalize_openai_request(
             model=model,
+            client_kwargs=merged_client_kwargs,
             api_key=api_key,
             base_url=base_url,
             stream=stream,
+            extra_body=merged_extra_body,
             llm_call_kwargs=merged_llm_call_kwargs,
         )
         if api_key is None and "api_key" in client_kwargs:
@@ -2826,6 +2829,8 @@ class Tree[B](_ForwardingChildNode[B]):
         api_key: str | LLMApiKeyFactory[B] | None = None,
         name: str = "",
         base_url: str | LLMBaseURLFactory[B] | None = None,
+        client_kwargs: dict[str, Any] | None = None,
+        extra_body: dict[str, Any] | None = None,
         **llm_call_kwargs,
     ) -> Self:
         """
@@ -2855,10 +2860,11 @@ class Tree[B](_ForwardingChildNode[B]):
         :param base_url: Optional base URL string or a factory function `f(blackboard) -> str | None`.
             Use this for OpenAI-compatible providers while keeping `model`
             independent from the transport endpoint.
+        :param client_kwargs: Optional keyword arguments forwarded to `AsyncOpenAI(...)`.
+        :param extra_body: Optional provider-specific request body fields merged into `extra_body`.
         :param name: Optional name for the node.
         :param llm_call_kwargs: Extra keyword arguments forwarded to
-            `AsyncOpenAI().chat.completions.create(...)`. Selected client options such as
-            `timeout`, `max_retries`, `organization`, and `project` are also accepted.
+            `AsyncOpenAI().chat.completions.create(...)`.
 
         Example::
 
@@ -2872,7 +2878,18 @@ class Tree[B](_ForwardingChildNode[B]):
             .End()
         """
         return self._attach(
-            LLMNode[B](model, messages, stream, stream_on_delta, api_key, name, base_url, **llm_call_kwargs)
+            LLMNode[B](
+                model,
+                messages,
+                stream,
+                stream_on_delta,
+                api_key,
+                name,
+                base_url,
+                client_kwargs,
+                extra_body,
+                **llm_call_kwargs,
+            )
         )
 
     def Subtree[B1](
