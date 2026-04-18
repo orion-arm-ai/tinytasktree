@@ -151,10 +151,8 @@ import logging
 import mimetypes
 import os
 import pickle
-import queue
 import random
 import reprlib
-import threading
 import uuid
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
@@ -3437,81 +3435,6 @@ else:
 def create_http_app(trace_dir: str = ".traces") -> Any:
     storage = FileTraceStorageHandler(trace_dir)
     ui_root = _find_bundled_ui_root()
-    http_llm_api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
-    http_llm_base_url = os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL")
-
-    @dataclass
-    class LLMBlackboard:
-        model: str
-        messages: list[JSON]
-        output: str = ""
-        stream_on_delta: LLMStreamOnChunkCallback1["LLMBlackboard"] | None = None
-
-    def _bb_stream_on_delta(b: "LLMBlackboard", fulltext: str, delta: str, finished: bool) -> None:
-        if b.stream_on_delta is not None:
-            b.stream_on_delta(b, fulltext, delta, finished)
-
-    @dataclass
-    class LLMRequest:
-        model: str
-        messages: list[JSON]
-        stream: bool = False
-        llm_call_kwargs: JSON = field(default_factory=dict)
-
-    def _make_llm_tree(stream: bool, llm_call_kwargs: JSON) -> Tree["LLMBlackboard"]:
-        # Build per request so extra OpenAI-compatible kwargs such as `reasoning`
-        # can be forwarded without constraining the HTTP schema.
-        # fmt: off
-        return (
-            Tree[LLMBlackboard]("LLMHttp")
-            .Sequence()
-            ._().LLM(
-                lambda b: b.model,
-                lambda b: b.messages,
-                stream=stream,
-                stream_on_delta=_bb_stream_on_delta if stream else None,
-                api_key=http_llm_api_key,
-                base_url=http_llm_base_url,
-                **llm_call_kwargs,
-            )
-            ._().WriteBlackboard("output")
-            .End()
-        )
-        # fmt: on
-
-    async def llm(req: LLMRequest) -> tuple[int, JSON]:
-        context = Context()
-        blackboard = LLMBlackboard(model=req.model, messages=req.messages)
-        llm_tree = _make_llm_tree(False, req.llm_call_kwargs)
-
-        async with context.using_blackboard(blackboard):
-            result = await llm_tree(context)
-        if not result.is_ok():
-            return HTTPStatus.INTERNAL_SERVER_ERROR, {"detail": str(result)}
-        return HTTPStatus.OK, {"output": blackboard.output}
-
-    async def llm_stream(req: LLMRequest, chunks: queue.Queue[str | None]) -> None:
-        context = Context()
-        blackboard = LLMBlackboard(model=req.model, messages=req.messages)
-        stream_llm_tree = _make_llm_tree(True, req.llm_call_kwargs)
-
-        def on_delta(b: "LLMBlackboard", fulltext: str, delta: str, done: bool) -> None:
-            if delta:
-                chunks.put(delta)
-            if done:
-                chunks.put(None)
-
-        blackboard.stream_on_delta = on_delta
-
-        async with context.using_blackboard(blackboard):
-            try:
-                result = await stream_llm_tree(context)
-                if not result.is_ok():
-                    raise TasktreeError(str(result))
-            except Exception as e:
-                chunks.put(f"\n[ERROR] {e}\n")
-            finally:
-                chunks.put(None)
 
     class TasktreeHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -3529,47 +3452,6 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
                 return
             self._send_json(HTTPStatus.NOT_FOUND, {"detail": f"not found: {parsed.path}"})
 
-        def do_POST(self) -> None:
-            parsed = urlparse(self.path)
-            if parsed.path == "/llm":
-                self._handle_llm()
-                return
-            self._send_json(HTTPStatus.NOT_FOUND, {"detail": f"not found: {parsed.path}"})
-
-        def _read_json_body(self) -> JSON:
-            content_length = _as_int(self.headers.get("Content-Length"))
-            if content_length is None or content_length < 0:
-                raise TasktreeError("invalid Content-Length")
-            data = self.rfile.read(content_length)
-            try:
-                payload = _json_loads(data)
-            except Exception as e:
-                raise TasktreeError(f"invalid json body: {e}") from e
-            if not isinstance(payload, dict):
-                raise TasktreeError("json body must be an object")
-            return cast(JSON, payload)
-
-        def _parse_llm_request(self) -> LLMRequest:
-            payload = self._read_json_body()
-            model = payload.get("model")
-            messages = payload.get("messages")
-            stream = payload.get("stream", False)
-            if "api_key" in payload:
-                raise TasktreeError("field 'api_key' is not allowed; configure LLM_API_KEY on the server")
-            llm_call_kwargs = {k: v for k, v in payload.items() if k not in {"model", "messages", "stream"}}
-            if not isinstance(model, str) or not model:
-                raise TasktreeError("field 'model' must be a non-empty string")
-            if not isinstance(messages, list):
-                raise TasktreeError("field 'messages' must be a list")
-            if not isinstance(stream, bool):
-                raise TasktreeError("field 'stream' must be a bool")
-            return LLMRequest(
-                model=model,
-                messages=cast(list[JSON], messages),
-                stream=stream,
-                llm_call_kwargs=llm_call_kwargs,
-            )
-
         def _send_json(self, status: int, payload: JSON) -> None:
             body = _json_dumps(payload, default=_json_default_serializer)
             self.send_response(status)
@@ -3577,17 +3459,6 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-
-        def _write_chunk(self, data: str) -> None:
-            body = data.encode("utf-8")
-            self.wfile.write(f"{len(body):X}\r\n".encode("ascii"))
-            self.wfile.write(body)
-            self.wfile.write(b"\r\n")
-            self.wfile.flush()
-
-        def _finish_chunks(self) -> None:
-            self.wfile.write(b"0\r\n\r\n")
-            self.wfile.flush()
 
         def _handle_trace(self, trace_id: str) -> None:
             try:
@@ -3613,43 +3484,6 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
             self.end_headers()
             self.wfile.write(body)
             return True
-
-        def _handle_llm(self) -> None:
-            try:
-                req = self._parse_llm_request()
-            except TasktreeError as e:
-                self._send_json(HTTPStatus.BAD_REQUEST, {"detail": str(e)})
-                return
-
-            if not req.stream:
-                status, payload = asyncio.run(llm(req))
-                self._send_json(status, payload)
-                return
-
-            chunks: queue.Queue[str | None] = queue.Queue()
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Transfer-Encoding", "chunked")
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-
-            worker = threading.Thread(target=lambda: asyncio.run(llm_stream(req, chunks)), daemon=True)
-            worker.start()
-
-            try:
-                while True:
-                    chunk = chunks.get()
-                    if chunk is None:
-                        break
-                    self._write_chunk(chunk)
-            except BrokenPipeError:
-                logger.info("httpserver: streaming client disconnected")
-            finally:
-                worker.join()
-                try:
-                    self._finish_chunks()
-                except BrokenPipeError:
-                    pass
 
     TasktreeHTTPRequestHandler._ui_root = ui_root  # type: ignore[attr-defined]
     return TasktreeHTTPRequestHandler
@@ -3678,19 +3512,12 @@ def _main() -> None:
 
     parser = argparse.ArgumentParser(
         description="tinytasktree utilities",
-        epilog=(
-            "Built-in HTTP server LLM configuration:\n"
-            "  LLM_API_KEY      primary server-side API key\n"
-            "  OPENAI_API_KEY   compatibility fallback for API key\n"
-            "  LLM_BASE_URL     primary server-side base URL\n"
-            "  OPENAI_BASE_URL  compatibility fallback for base URL"
-        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--httpserver",
         action="store_true",
-        help="start the built-in HTTP server; LLM auth/config comes from LLM_API_KEY/LLM_BASE_URL env vars",
+        help="start the built-in HTTP server for the trace UI and trace JSON routes",
     )
     parser.add_argument("--host", default="127.0.0.1", help="http server host")
     parser.add_argument("--port", type=int, default=8000, help="http server port")

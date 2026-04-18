@@ -8,7 +8,6 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/trace": "http://127.0.0.1:8000",
-      "/llm": "http://127.0.0.1:8000",
     },
   },
 });

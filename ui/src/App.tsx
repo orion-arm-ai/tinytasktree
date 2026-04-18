@@ -39,19 +39,6 @@ const Y_SPACING = 190;
 const MIN_LEFT_WIDTH = 360;
 const MAX_LEFT_WIDTH = 1400;
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim().replace(/\/+$/, "") || "";
-const PLAYGROUND_RESERVED_KEYS = new Set([
-    "model",
-    "messages",
-    "stream",
-    "api_key",
-    "base_url",
-    "output",
-    "finish_reason",
-    "tokens",
-    "prompt_tokens",
-    "completion_tokens",
-    "total_tokens",
-]);
 
 type KindIconProps = {
     className?: string;
@@ -393,47 +380,6 @@ function apiUrl(path: string): string {
     return `${API_BASE_URL}${path}`;
 }
 
-function estimateTokenCount(text: string): number {
-    if (!text.trim()) return 0;
-    const bytes = new TextEncoder().encode(text).length;
-    return Math.max(1, Math.ceil(bytes / 4));
-}
-
-function estimateMessageTokens(messages: unknown): number | null {
-    if (!Array.isArray(messages)) return null;
-    let total = 0;
-    for (const message of messages) {
-        if (!message || typeof message !== "object") return null;
-        const obj = message as Record<string, unknown>;
-        const role = typeof obj.role === "string" ? obj.role : "";
-        const content = obj.content;
-        if (typeof content === "string") {
-            total += estimateTokenCount(role) + estimateTokenCount(content);
-            continue;
-        }
-        if (Array.isArray(content)) {
-            let chunkText = "";
-            for (const item of content) {
-                if (typeof item === "string") {
-                    chunkText += item;
-                } else if (item && typeof item === "object") {
-                    const text = (item as Record<string, unknown>).text;
-                    if (typeof text === "string") chunkText += text;
-                }
-            }
-            total += estimateTokenCount(role) + estimateTokenCount(chunkText);
-            continue;
-        }
-        total += estimateTokenCount(role);
-    }
-    return total;
-}
-
-function formatElapsedMs(ms: number): string {
-    if (ms < 1000) return `${ms} ms`;
-    return `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s`;
-}
-
 function parseDate(value: string): number {
     const ts = Date.parse(value);
     return Number.isNaN(ts) ? 0 : ts;
@@ -441,25 +387,6 @@ function parseDate(value: string): number {
 
 function sortChildren(children: Record<string, TraceNodeJson>): TraceNodeJson[] {
     return Object.values(children).sort((a, b) => parseDate(a.start_at) - parseDate(b.start_at));
-}
-
-function extractSystemUser(messages: unknown): { system: string; user: string } {
-    let system = "";
-    let user = "";
-    if (!Array.isArray(messages)) return { system, user };
-    for (const msg of messages) {
-        if (!msg || typeof msg !== "object") continue;
-        const role = (msg as { role?: string }).role;
-        const raw = (msg as { content?: unknown }).content;
-        const content = typeof raw === "string" ? raw : raw != null ? JSON.stringify(raw) : "";
-        if (role === "system" && !system) {
-            system = content;
-        }
-        if (role === "user") {
-            user = content;
-        }
-    }
-    return { system, user };
 }
 
 function hasResultContent(raw: unknown): boolean {
@@ -914,34 +841,6 @@ function copyText(text: string) {
     void navigator.clipboard.writeText(text);
 }
 
-function parseTraceAttributeValue(value: unknown): unknown {
-    if (typeof value !== "string") return value;
-    const trimmed = value.trim();
-    if (!trimmed) return "";
-    if (trimmed === "true") return true;
-    if (trimmed === "false") return false;
-    if (trimmed === "null") return null;
-    if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
-    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]")) || (trimmed.startsWith('"') && trimmed.endsWith('"'))) {
-        try {
-            return JSON.parse(trimmed);
-        } catch {
-            return value;
-        }
-    }
-    return value;
-}
-
-function extractReplayableLlmParams(attributes: Record<string, unknown> | undefined): Record<string, unknown> {
-    if (!attributes) return {};
-    const extraParams: Record<string, unknown> = {};
-    Object.entries(attributes).forEach(([key, value]) => {
-        if (PLAYGROUND_RESERVED_KEYS.has(key)) return;
-        extraParams[key] = parseTraceAttributeValue(value);
-    });
-    return extraParams;
-}
-
 function TraceUI() {
     const [trace, setTrace] = useState<TraceNodeJson | null>(null);
     const [viewMode, setViewMode] = useState<"flow" | "stack">("stack");
@@ -951,18 +850,6 @@ function TraceUI() {
     const [loadError, setLoadError] = useState<string | null>(null);
     const [selectedId, setSelectedId] = useState<string | null>(null);
     const [tab, setTab] = useState<"result" | "logs" | "attributes">("result");
-    const [playModel, setPlayModel] = useState("");
-    const [playMessages, setPlayMessages] = useState("[]");
-    const [playExtraParams, setPlayExtraParams] = useState("{}");
-    const [playEditorMode, setPlayEditorMode] = useState<"split" | "json">("split");
-    const [playSystem, setPlaySystem] = useState("");
-    const [playUser, setPlayUser] = useState("");
-    const [playStream, setPlayStream] = useState(true);
-    const [playOutput, setPlayOutput] = useState("");
-    const [playRunning, setPlayRunning] = useState(false);
-    const [playError, setPlayError] = useState<string | null>(null);
-    const [playStartedAt, setPlayStartedAt] = useState<number | null>(null);
-    const [playElapsedMs, setPlayElapsedMs] = useState(0);
     const initialLeftWidth = useMemo(() => {
         if (typeof window === "undefined") return 640;
         return Math.min(MAX_LEFT_WIDTH, Math.max(MIN_LEFT_WIDTH, Math.floor(window.innerWidth * 0.65)));
@@ -1196,168 +1083,6 @@ function TraceUI() {
         };
     }, [flowInstance, nodes.length, activeFoldIds]);
 
-    useEffect(() => {
-        if (!selectedTrace) return;
-        const modelStr = selectedTrace.attributes?.model ? selectedTrace.attributes.model : "";
-        const messagesStr = selectedTrace.attributes?.messages ? selectedTrace.attributes.messages : "[]";
-        try {
-            const parsedModel = JSON.parse(modelStr);
-            if (typeof parsedModel === "string") setPlayModel(parsedModel);
-        } catch {
-            if (modelStr) setPlayModel(modelStr);
-        }
-        try {
-            const parsedMessages = JSON.parse(messagesStr);
-            setPlayMessages(JSON.stringify(parsedMessages, null, 2));
-            const extracted = extractSystemUser(parsedMessages);
-            setPlaySystem(extracted.system);
-            setPlayUser(extracted.user);
-        } catch {
-            setPlayMessages(messagesStr || "[]");
-            setPlaySystem("");
-            setPlayUser("");
-        }
-        const streamAttr = selectedTrace.attributes?.stream;
-        if (typeof streamAttr === "boolean") {
-            setPlayStream(streamAttr);
-        } else if (typeof streamAttr === "number") {
-            setPlayStream(streamAttr !== 0);
-        } else if (typeof streamAttr === "string") {
-            const s = streamAttr.trim().toLowerCase();
-            if (s === "true" || s === "1" || s === "yes") {
-                setPlayStream(true);
-            } else if (s === "false" || s === "0" || s === "no") {
-                setPlayStream(false);
-            } else {
-                setPlayStream(true);
-            }
-        } else {
-            setPlayStream(true);
-        }
-        const extraParams = extractReplayableLlmParams(selectedTrace.attributes as Record<string, unknown> | undefined);
-        setPlayExtraParams(JSON.stringify(extraParams, null, 2));
-    }, [selectedTrace]);
-
-    useEffect(() => {
-        if (!playRunning || playStartedAt == null) return;
-        const timer = window.setInterval(() => {
-            setPlayElapsedMs(Date.now() - playStartedAt);
-        }, 120);
-        return () => window.clearInterval(timer);
-    }, [playRunning, playStartedAt]);
-
-    const playInputTokens = useMemo(() => {
-        try {
-            if (playEditorMode === "split") {
-                const messages: Array<{ role: string; content: string }> = [];
-                const sys = playSystem.trim();
-                const usr = playUser.trim();
-                if (sys) messages.push({ role: "system", content: sys });
-                if (usr) messages.push({ role: "user", content: usr });
-                return estimateMessageTokens(messages);
-            }
-            return estimateMessageTokens(JSON.parse(playMessages));
-        } catch {
-            return null;
-        }
-    }, [playEditorMode, playMessages, playSystem, playUser]);
-
-    const playOutputTokens = useMemo(() => estimateTokenCount(playOutput), [playOutput]);
-    const playTotalTokens = (playInputTokens ?? 0) + playOutputTokens;
-
-    const onRunPlayground = useCallback(async () => {
-        setPlayRunning(true);
-        setPlayOutput("");
-        setPlayError(null);
-        const startedAt = Date.now();
-        setPlayStartedAt(startedAt);
-        setPlayElapsedMs(0);
-        try {
-            let messages: any[] = [];
-            if (playEditorMode === "split") {
-                const sys = playSystem.trim();
-                const usr = playUser.trim();
-                messages = [];
-                if (sys) messages.push({ role: "system", content: sys });
-                if (usr) messages.push({ role: "user", content: usr });
-            } else {
-                messages = JSON.parse(playMessages);
-                if (!Array.isArray(messages)) {
-                    throw new Error("Messages JSON must be an array");
-                }
-            }
-            let extraParams: Record<string, unknown> = {};
-            try {
-                const parsed = JSON.parse(playExtraParams || "{}");
-                if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
-                    throw new Error("Extra params JSON must be an object");
-                }
-                extraParams = { ...(parsed as Record<string, unknown>) };
-            } catch (error) {
-                if (error instanceof Error) {
-                    throw error;
-                }
-                throw new Error("Invalid extra params JSON");
-            }
-            for (const key of PLAYGROUND_RESERVED_KEYS) {
-                if (key in extraParams) {
-                    delete extraParams[key];
-                }
-            }
-            const payload = {
-                model: playModel,
-                messages,
-                stream: playStream,
-                ...extraParams,
-            };
-            const resp = await fetch(apiUrl("/llm"), {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
-            });
-            if (!resp.ok) {
-                let detail = `LLM request failed: ${resp.status}`;
-                try {
-                    const errBody = await resp.json();
-                    if (typeof errBody?.error === "string" && errBody.error) detail = errBody.error;
-                    else if (typeof errBody?.detail === "string" && errBody.detail) detail = errBody.detail;
-                } catch {
-                    try {
-                        const errText = await resp.text();
-                        if (errText) detail = errText;
-                    } catch {
-                        // ignore
-                    }
-                }
-                throw new Error(detail);
-            }
-            if (!playStream) {
-                const data = await resp.json();
-                setPlayOutput(data.output || "");
-                return;
-            }
-            const reader = resp.body?.getReader();
-            if (!reader) {
-                throw new Error("Streaming not supported");
-            }
-            const decoder = new TextDecoder();
-            let done = false;
-            while (!done) {
-                const chunk = await reader.read();
-                done = chunk.done;
-                if (chunk.value) {
-                    setPlayOutput((prev) => prev + decoder.decode(chunk.value, { stream: true }));
-                }
-            }
-        } catch (err) {
-            const message = err instanceof Error ? err.message : "Unknown error";
-            setPlayError(message);
-            setPlayOutput(`Error: ${message}`);
-        } finally {
-            setPlayElapsedMs(startedAt ? Date.now() - startedAt : 0);
-            setPlayRunning(false);
-        }
-    }, [playEditorMode, playExtraParams, playModel, playMessages, playStream, playSystem, playUser]);
 
     const searchResults = useMemo(() => {
         if (searchTerm.trim().length < 1) return [];
@@ -1528,28 +1253,6 @@ function TraceUI() {
         },
         [autoFoldOn, manualExpandIds, manualFoldIds, maxDepth, suggestFoldIds]
     );
-
-    const handleTogglePlayEditor = useCallback(() => {
-        if (playEditorMode === "split") {
-            const messages: any[] = [];
-            const sys = playSystem.trim();
-            const usr = playUser.trim();
-            if (sys) messages.push({ role: "system", content: sys });
-            if (usr) messages.push({ role: "user", content: usr });
-            setPlayMessages(JSON.stringify(messages, null, 2));
-            setPlayEditorMode("json");
-            return;
-        }
-        try {
-            const parsed = JSON.parse(playMessages);
-            const extracted = extractSystemUser(parsed);
-            setPlaySystem(extracted.system);
-            setPlayUser(extracted.user);
-            setPlayEditorMode("split");
-        } catch {
-            setPlayError("Invalid JSON: cannot auto-format");
-        }
-    }, [playEditorMode, playMessages, playSystem, playUser]);
 
     const searchCards = useMemo(() => {
         return searchResults.map((item) => {
@@ -2160,104 +1863,6 @@ function TraceUI() {
                                 items={detailsTabs}
                             />
 
-                            {selectedTrace.kind === "LLM" && (
-                                <Card
-                                    className="playground"
-                                    title={<Text strong>LLM Playground</Text>}
-                                    extra={
-                                        <Button size="small" onClick={handleTogglePlayEditor}>
-                                            {playEditorMode === "split" ? "JSON" : "Text"}
-                                        </Button>
-                                    }
-                                >
-                                    <Space direction="vertical" size={12} className="playground-fields">
-                                        <div>
-                                            <Text className="field-label">Model</Text>
-                                            <Input value={playModel} onChange={(e) => setPlayModel(e.target.value)} />
-                                        </div>
-                                        {playEditorMode === "split" ? (
-                                            <>
-                                                <div>
-                                                    <Text className="field-label">System</Text>
-                                                    <Input.TextArea
-                                                        className="playground-textarea"
-                                                        rows={8}
-                                                        value={playSystem}
-                                                        onChange={(e) => setPlaySystem(e.target.value)}
-                                                    />
-                                                </div>
-                                                <div>
-                                                    <Text className="field-label">User</Text>
-                                                    <Input.TextArea
-                                                        className="playground-textarea"
-                                                        rows={10}
-                                                        value={playUser}
-                                                        onChange={(e) => setPlayUser(e.target.value)}
-                                                    />
-                                                </div>
-                                            </>
-                                        ) : (
-                                            <div>
-                                                <Text className="field-label">Messages (JSON)</Text>
-                                                <Input.TextArea
-                                                    className="playground-textarea"
-                                                    rows={12}
-                                                    value={playMessages}
-                                                    onChange={(e) => setPlayMessages(e.target.value)}
-                                                />
-                                            </div>
-                                        )}
-                                        <div>
-                                            <Text className="field-label">Extra Params (JSON)</Text>
-                                            <Input.TextArea
-                                                className="playground-textarea"
-                                                rows={8}
-                                                value={playExtraParams}
-                                                onChange={(e) => setPlayExtraParams(e.target.value)}
-                                            />
-                                        </div>
-                                        <Space align="center">
-                                            <Switch checked={playStream} onChange={setPlayStream} size="small" />
-                                            <Text className="toggle-label">Stream</Text>
-                                        </Space>
-                                        <Space align="center">
-                                            <Button type="primary" onClick={onRunPlayground} loading={playRunning}>
-                                                {playRunning ? "Running..." : "Run"}
-                                            </Button>
-                                            {playError && <Text className="error-inline">{playError}</Text>}
-                                        </Space>
-                                    </Space>
-                                    <div className="playground-output">
-                                        {playError && (
-                                            <Alert type="error" message={playError} showIcon className="playground-error" />
-                                        )}
-                                        <div className="playground-stats">
-                                            <div className="playground-stat">
-                                                <span className="playground-stat-label">Elapsed</span>
-                                                <strong>{formatElapsedMs(playElapsedMs)}</strong>
-                                            </div>
-                                            <div className="playground-stat">
-                                                <span className="playground-stat-label">Input Tokens</span>
-                                                <strong>{playInputTokens ?? "-"}</strong>
-                                            </div>
-                                            <div className="playground-stat">
-                                                <span className="playground-stat-label">Output Tokens</span>
-                                                <strong>{playOutputTokens}</strong>
-                                            </div>
-                                            <div className="playground-stat">
-                                                <span className="playground-stat-label">Total Tokens</span>
-                                                <strong>{playInputTokens == null ? "-" : playTotalTokens}</strong>
-                                            </div>
-                                        </div>
-                                        <div className="panel-actions">
-                                            <Button size="small" onClick={() => copyText(playOutput)}>
-                                                Copy
-                                            </Button>
-                                        </div>
-                                        <pre>{playOutput || "(no output yet)"}</pre>
-                                    </div>
-                                </Card>
-                            )}
                         </div>
                     )}
                 </div>
