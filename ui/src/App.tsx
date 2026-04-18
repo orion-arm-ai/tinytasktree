@@ -38,6 +38,7 @@ const X_SPACING = 420;
 const Y_SPACING = 190;
 const MIN_LEFT_WIDTH = 360;
 const MAX_LEFT_WIDTH = 1400;
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim().replace(/\/+$/, "") || "";
 
 type TraceNodeJson = {
     name: string;
@@ -209,6 +210,11 @@ function tokenizeQuery(query: string): string[] {
 
 function escapeRegex(text: string): string {
     return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function apiUrl(path: string): string {
+    if (!API_BASE_URL) return path;
+    return `${API_BASE_URL}${path}`;
 }
 
 function parseDate(value: string): number {
@@ -560,9 +566,17 @@ function TraceUI() {
         setTrace(null);
         setSelectedId(null);
         try {
-            const resp = await fetch(`/trace/${encodeURIComponent(id)}`);
+            const resp = await fetch(apiUrl(`/trace/${encodeURIComponent(id)}`));
             if (!resp.ok) {
-                throw new Error(`Failed to load trace: ${resp.status}`);
+                let detail = `Failed to load trace: ${resp.status}`;
+                try {
+                    const errBody = await resp.json();
+                    if (typeof errBody?.error === "string" && errBody.error) detail = errBody.error;
+                    else if (typeof errBody?.detail === "string" && errBody.detail) detail = errBody.detail;
+                } catch {
+                    // ignore
+                }
+                throw new Error(detail);
             }
             const data = (await resp.json()) as TraceNodeJson;
             setTrace(data);
@@ -769,7 +783,7 @@ function TraceUI() {
                 messages,
                 stream: playStream,
             };
-            const resp = await fetch("/llm", {
+            const resp = await fetch(apiUrl("/llm"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload),
@@ -778,7 +792,8 @@ function TraceUI() {
                 let detail = `LLM request failed: ${resp.status}`;
                 try {
                     const errBody = await resp.json();
-                    if (errBody?.error) detail = String(errBody.error);
+                    if (typeof errBody?.error === "string" && errBody.error) detail = errBody.error;
+                    else if (typeof errBody?.detail === "string" && errBody.detail) detail = errBody.detail;
                 } catch {
                     try {
                         const errText = await resp.text();

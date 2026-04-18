@@ -105,6 +105,10 @@ cd ui && npm run dev
 
 # 3) open the UI
 # http://127.0.0.1:5173
+
+# optional: for `npm run preview` or a static `ui/dist` deploy,
+# set the backend origin explicitly at build time
+VITE_API_BASE_URL=http://127.0.0.1:8000 npm run build
 ```
 
 ![](misc/tasktree-ui.png)
@@ -808,7 +812,7 @@ tree = (
 - `register_global_hook_after_spawned_task_finish(hook)`: hook for Parallel/Gather/Terminable tasks
 - `set_default_llm_api_key_factory(factory_or_key)`: default LLM API key or factory
 - `set_default_global_redis_client(url, **kwargs)`: global Redis client for Redis nodes
-- `run_httpserver(host, port, trace_dir)` / `create_http_app(...)`: HTTP trace server
+- `run_httpserver(host, port, trace_dir)` / `create_http_app(...)`: built-in HTTP trace server
 
 ## Contributing <span id="contributing"></span>
 

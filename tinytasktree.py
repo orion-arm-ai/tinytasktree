@@ -136,10 +136,12 @@ Author: chao.wang [at] orionarm.ai
 
 import asyncio
 import functools
+import http.server
 import inspect
 import logging
 import os
 import pickle
+import queue
 import random
 import reprlib
 import threading
@@ -149,6 +151,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, is_dataclass
 from datetime import date, datetime, timedelta
 from enum import Enum, IntEnum
+from http import HTTPStatus
 from typing import (
     Any,
     AsyncContextManager,
@@ -164,6 +167,7 @@ from typing import (
     final,
     override,
 )
+from urllib.parse import unquote, urlparse
 
 import json_repair
 from openai import AsyncOpenAI
@@ -3312,28 +3316,7 @@ else:
 
 
 def create_http_app(trace_dir: str = ".traces") -> Any:
-    try:
-        from fastapi import FastAPI, HTTPException
-        from fastapi.responses import StreamingResponse
-        from pydantic import BaseModel
-    except Exception as e:  # pragma: no cover - optional dependency
-        raise TasktreeError("fastapi and pydantic are required for the http server") from e
-
     storage = FileTraceStorageHandler(trace_dir)
-    app = FastAPI()
-
-    class LLMRequest(BaseModel):
-        model: str
-        messages: list[JSON]
-        stream: bool = False
-        api_key: str | None = None
-
-    @app.get("/trace/{trace_id}")
-    async def get_trace(trace_id: str) -> JSON:
-        try:
-            return await storage.query(trace_id)
-        except FileNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
 
     @dataclass
     class LLMBlackboard:
@@ -3351,76 +3334,192 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
     llm_tree = (
         Tree[LLMBlackboard]("LLMHttp")
         .Sequence()
+        ._().LLM(lambda b: b.model, lambda b: b.messages, stream=False, api_key=lambda b: b.api_key)
+        ._().WriteBlackboard("output")
+        .End()
+    )
+    stream_llm_tree = (
+        Tree[LLMBlackboard]("LLMHttp")
+        .Sequence()
         ._().LLM(lambda b: b.model, lambda b: b.messages, stream=True, stream_on_delta=_bb_stream_on_delta, api_key=lambda b: b.api_key)
         ._().WriteBlackboard("output")
         .End()
     )
     # fmt: on
 
-    @app.post("/llm")
-    async def llm(req: LLMRequest) -> Any:
+    @dataclass
+    class LLMRequest:
+        model: str
+        messages: list[JSON]
+        stream: bool = False
+        api_key: str | None = None
+
+    async def llm(req: LLMRequest) -> tuple[int, JSON]:
         context = Context()
         blackboard = LLMBlackboard(model=req.model, messages=req.messages, api_key=req.api_key)
 
-        if not req.stream:
-            async with context.using_blackboard(blackboard):
-                result = await llm_tree(context)
-            if not result.is_ok():
-                raise HTTPException(status_code=500, detail=str(result))
-            return {"output": blackboard.output}
+        async with context.using_blackboard(blackboard):
+            result = await llm_tree(context)
+        if not result.is_ok():
+            return HTTPStatus.INTERNAL_SERVER_ERROR, {"detail": str(result)}
+        return HTTPStatus.OK, {"output": blackboard.output}
 
-        queue: asyncio.Queue[str | None] = asyncio.Queue()
-        error_msg: list[str] = []
+    async def llm_stream(req: LLMRequest, chunks: queue.Queue[str | None]) -> None:
+        context = Context()
+        blackboard = LLMBlackboard(model=req.model, messages=req.messages, api_key=req.api_key)
 
-        def on_delta(b, fulltext, delta, done):
+        def on_delta(b: "LLMBlackboard", fulltext: str, delta: str, done: bool) -> None:
             if delta:
-                queue.put_nowait(delta)
+                chunks.put(delta)
             if done:
-                queue.put_nowait(None)
+                chunks.put(None)
 
         blackboard.stream_on_delta = on_delta
 
-        async def _stream() -> AsyncGenerator[bytes, None]:
-            async with context.using_blackboard(blackboard):
+        async with context.using_blackboard(blackboard):
+            try:
+                result = await stream_llm_tree(context)
+                if not result.is_ok():
+                    raise TasktreeError(str(result))
+            except Exception as e:
+                chunks.put(f"\n[ERROR] {e}\n")
+            finally:
+                chunks.put(None)
 
-                async def _run() -> None:
-                    try:
-                        result = await llm_tree(context)
-                        if not result.is_ok():
-                            raise TasktreeError(str(result))
-                    except Exception as e:
-                        error_msg.append(str(e))
-                        queue.put_nowait(f"\n[ERROR] {e}\n")
-                        queue.put_nowait(None)
-                        return
-                    queue.put_nowait(None)
+    class TasktreeHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
 
-                task = asyncio.create_task(_run())
+        def log_message(self, fmt: str, *args: Any) -> None:
+            logger.info("httpserver: " + fmt, *args)
+
+        def do_GET(self) -> None:
+            parsed = urlparse(self.path)
+            if parsed.path.startswith("/trace/"):
+                trace_id = unquote(parsed.path.removeprefix("/trace/"))
+                self._handle_trace(trace_id)
+                return
+            self._send_json(HTTPStatus.NOT_FOUND, {"detail": f"not found: {parsed.path}"})
+
+        def do_POST(self) -> None:
+            parsed = urlparse(self.path)
+            if parsed.path == "/llm":
+                self._handle_llm()
+                return
+            self._send_json(HTTPStatus.NOT_FOUND, {"detail": f"not found: {parsed.path}"})
+
+        def _read_json_body(self) -> JSON:
+            content_length = _as_int(self.headers.get("Content-Length"))
+            if content_length is None or content_length < 0:
+                raise TasktreeError("invalid Content-Length")
+            data = self.rfile.read(content_length)
+            try:
+                payload = orjson.loads(data)
+            except Exception as e:
+                raise TasktreeError(f"invalid json body: {e}") from e
+            if not isinstance(payload, dict):
+                raise TasktreeError("json body must be an object")
+            return cast(JSON, payload)
+
+        def _parse_llm_request(self) -> LLMRequest:
+            payload = self._read_json_body()
+            model = payload.get("model")
+            messages = payload.get("messages")
+            stream = payload.get("stream", False)
+            api_key = payload.get("api_key")
+            if not isinstance(model, str) or not model:
+                raise TasktreeError("field 'model' must be a non-empty string")
+            if not isinstance(messages, list):
+                raise TasktreeError("field 'messages' must be a list")
+            if not isinstance(stream, bool):
+                raise TasktreeError("field 'stream' must be a bool")
+            if api_key is not None and not isinstance(api_key, str):
+                raise TasktreeError("field 'api_key' must be a string or null")
+            return LLMRequest(model=model, messages=cast(list[JSON], messages), stream=stream, api_key=api_key)
+
+        def _send_json(self, status: int, payload: JSON) -> None:
+            body = orjson.dumps(payload, default=_orjson_default_serializer)
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _write_chunk(self, data: str) -> None:
+            body = data.encode("utf-8")
+            self.wfile.write(f"{len(body):X}\r\n".encode("ascii"))
+            self.wfile.write(body)
+            self.wfile.write(b"\r\n")
+            self.wfile.flush()
+
+        def _finish_chunks(self) -> None:
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+
+        def _handle_trace(self, trace_id: str) -> None:
+            try:
+                payload = asyncio.run(storage.query(trace_id))
+            except FileNotFoundError as e:
+                self._send_json(HTTPStatus.NOT_FOUND, {"detail": str(e)})
+                return
+            self._send_json(HTTPStatus.OK, payload)
+
+        def _handle_llm(self) -> None:
+            try:
+                req = self._parse_llm_request()
+            except TasktreeError as e:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"detail": str(e)})
+                return
+
+            if not req.stream:
+                status, payload = asyncio.run(llm(req))
+                self._send_json(status, payload)
+                return
+
+            chunks: queue.Queue[str | None] = queue.Queue()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+
+            worker = threading.Thread(target=lambda: asyncio.run(llm_stream(req, chunks)), daemon=True)
+            worker.start()
+
+            try:
                 while True:
-                    chunk = await queue.get()
+                    chunk = chunks.get()
                     if chunk is None:
                         break
-                    yield chunk.encode("utf-8")
-                await task
+                    self._write_chunk(chunk)
+            except BrokenPipeError:
+                logger.info("httpserver: streaming client disconnected")
+            finally:
+                worker.join()
+                try:
+                    self._finish_chunks()
+                except BrokenPipeError:
+                    pass
 
-        return StreamingResponse(_stream(), media_type="text/plain")
-
-    return app
+    return TasktreeHTTPRequestHandler
 
 
 def run_httpserver(host: str = "127.0.0.1", port: int = 8000, trace_dir: str = ".traces") -> None:
+    handler = create_http_app(trace_dir)
+    server = http.server.ThreadingHTTPServer((host, port), handler)
+    logger.info("httpserver: serving on http://%s:%s trace_dir=%s", host, port, trace_dir)
     try:
-        import uvicorn
-    except Exception as e:  # pragma: no cover - optional dependency
-        raise TasktreeProgrammingError("uvicorn is required to run the http server") from e
-    uvicorn.run(create_http_app(trace_dir), host=host, port=port)
+        server.serve_forever()
+    except KeyboardInterrupt:  # pragma: no cover
+        logger.info("httpserver: stopping")
+    finally:
+        server.server_close()
 
 
 def _main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="tinytasktree utilities")
-    parser.add_argument("--httpserver", action="store_true", help="start the built-in FastAPI server")
+    parser.add_argument("--httpserver", action="store_true", help="start the built-in HTTP server")
     parser.add_argument("--host", default="127.0.0.1", help="http server host")
     parser.add_argument("--port", type=int, default=8000, help="http server port")
     parser.add_argument("--trace-dir", default=".traces", help="trace storage directory")
