@@ -96,14 +96,21 @@ Note: It is safe to reuse a global `FileTraceStorageHandler` instance across run
 
 ### UI Server
 
-Trace UI (React/Vite) runs separately and proxies to the HTTP server:
+By default, the built-in HTTP server can serve the bundled UI directly:
+
+    # 1) start backend
+    python -m tinytasktree --httpserver --host 127.0.0.1 --port 8000 --trace-dir .traces
+    # 2) open a saved trace
+    http://127.0.0.1:8000/<trace_id>
+
+When developing the frontend, you can still run the React/Vite dev server separately:
 
     # 1) start backend
     python -m tinytasktree --httpserver --host 127.0.0.1 --port 8000 --trace-dir .traces
     # 2) start UI dev server
     cd ui && npm run dev
     # 3) open the UI
-    http://127.0.0.1:5173
+    http://127.0.0.1:5173/<trace_id>
 
 ### Others
 
@@ -137,9 +144,11 @@ Author: chao.wang [at] orionarm.ai
 import asyncio
 import functools
 import http.server
+import importlib.resources
 import inspect
 import json
 import logging
+import mimetypes
 import os
 import pickle
 import queue
@@ -153,6 +162,7 @@ from dataclasses import dataclass, field, is_dataclass
 from datetime import date, datetime, timedelta
 from enum import Enum, IntEnum
 from http import HTTPStatus
+from pathlib import Path, PurePosixPath
 from typing import (
     Any,
     AsyncContextManager,
@@ -232,6 +242,40 @@ def _json_dumps(
         ensure_ascii=False,
         separators=(",", ":") if indent is None else None,
     ).encode("utf-8")
+
+
+def _find_bundled_ui_root() -> Any | None:
+    try:
+        ui_root = importlib.resources.files("tinytasktree").joinpath("ui_dist")
+        if ui_root.joinpath("index.html").is_file():
+            return ui_root
+    except Exception:
+        pass
+
+    local_ui_root = Path(__file__).resolve().parents[1].joinpath("ui", "dist")
+    if local_ui_root.joinpath("index.html").is_file():
+        return local_ui_root
+    return None
+
+
+def _resolve_ui_file(ui_root: Any, request_path: str) -> tuple[Any, str] | None:
+    normalized = request_path.lstrip("/") or "index.html"
+    parts = [part for part in PurePosixPath(normalized).parts if part not in {"", "."}]
+    if any(part == ".." for part in parts):
+        return None
+
+    candidate = ui_root.joinpath(*parts) if parts else ui_root.joinpath("index.html")
+    if candidate.is_file():
+        content_type = mimetypes.guess_type(str(PurePosixPath(*parts)) if parts else "index.html")[0]
+        return candidate, content_type or "application/octet-stream"
+
+    if parts and any("." in part for part in parts):
+        return None
+
+    index_file = ui_root.joinpath("index.html")
+    if index_file.is_file():
+        return index_file, "text/html; charset=utf-8"
+    return None
 
 
 ##############
@@ -3392,6 +3436,7 @@ else:
 
 def create_http_app(trace_dir: str = ".traces") -> Any:
     storage = FileTraceStorageHandler(trace_dir)
+    ui_root = _find_bundled_ui_root()
     http_llm_api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
     http_llm_base_url = os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL")
 
@@ -3480,6 +3525,8 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
                 trace_id = unquote(parsed.path.removeprefix("/trace/"))
                 self._handle_trace(trace_id)
                 return
+            if self._handle_ui(parsed.path):
+                return
             self._send_json(HTTPStatus.NOT_FOUND, {"detail": f"not found: {parsed.path}"})
 
         def do_POST(self) -> None:
@@ -3550,6 +3597,23 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
                 return
             self._send_json(HTTPStatus.OK, payload)
 
+        def _handle_ui(self, path: str) -> bool:
+            if ui_root is None:
+                return False
+
+            resolved = _resolve_ui_file(ui_root, path)
+            if resolved is None:
+                return False
+
+            asset, content_type = resolved
+            body = asset.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return True
+
         def _handle_llm(self) -> None:
             try:
                 req = self._parse_llm_request()
@@ -3587,13 +3651,20 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
                 except BrokenPipeError:
                     pass
 
+    TasktreeHTTPRequestHandler._ui_root = ui_root  # type: ignore[attr-defined]
     return TasktreeHTTPRequestHandler
 
 
 def run_httpserver(host: str = "127.0.0.1", port: int = 8000, trace_dir: str = ".traces") -> None:
     handler = create_http_app(trace_dir)
     server = http.server.ThreadingHTTPServer((host, port), handler)
-    logger.info("httpserver: serving on http://%s:%s trace_dir=%s", host, port, trace_dir)
+    logger.info(
+        "httpserver: serving on http://%s:%s trace_dir=%s ui=%s",
+        host,
+        port,
+        trace_dir,
+        "yes" if getattr(handler, "_ui_root", None) is not None else "no",
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:  # pragma: no cover

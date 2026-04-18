@@ -93,7 +93,11 @@ pip install tinytasktree
 
 ## UI Trace Server
 
-Run the backend server and the React UI to view traces.
+There are two ways to use the UI:
+
+1. If you install a built Python package or wheel that bundles the UI, `python -m tinytasktree --httpserver ...`
+   serves the UI directly from the Python package.
+2. When developing the frontend, run the React dev server from `ui/`.
 
 Save traces into the same directory that the backend serves, for example:
 
@@ -107,12 +111,17 @@ async with context.using_blackboard(blackboard):
     result = await tree(context)
 
 trace_id = await storage.save(context.trace_root())
-print("Trace URL:", f"http://127.0.0.1:5173/{trace_id}")
+print("Trace URL:", f"http://127.0.0.1:8000/{trace_id}")
 ```
 
 Then start the backend and UI:
 
 ```bash
+# option A: packaged UI served directly by the Python httpserver
+python -m tinytasktree --httpserver --host 127.0.0.1 --port 8000 --trace-dir .traces
+# open http://127.0.0.1:8000/<trace_id>
+
+# option B: frontend development with the Vite dev server
 # 0) from the repo root, install UI deps once
 (cd ui && npm install)
 
@@ -122,7 +131,7 @@ python -m tinytasktree --httpserver --host 127.0.0.1 --port 8000 --trace-dir .tr
 # 2) in another terminal, start the UI dev server
 (cd ui && npm run dev)
 
-# 3) open the trace
+# 3) open the trace in the dev UI
 # http://127.0.0.1:5173/<trace_id>
 
 # optional: for `npm run preview` or a static `ui/dist` deploy,
@@ -132,8 +141,10 @@ VITE_API_BASE_URL=http://127.0.0.1:8000 npm run build
 
 Notes:
 - `--trace-dir .traces` must point to the same directory used by `FileTraceStorageHandler(".traces")`
-- Opening `http://127.0.0.1:5173/<trace_id>` loads that specific trace directly
-- If you only open `http://127.0.0.1:5173`, the UI starts without a selected trace
+- When the UI is bundled into the Python package, the backend serves `index.html` and assets directly
+- Recommended default: open `http://127.0.0.1:8000/<trace_id>`
+- Use `http://127.0.0.1:5173/<trace_id>` only when you are running the Vite dev UI
+- If you only open `http://127.0.0.1:8000` or `http://127.0.0.1:5173`, the UI starts without a selected trace
 
 ![](misc/tasktree-ui.png)
 
@@ -871,6 +882,7 @@ tree = (
 ## Contributing <span id="contributing"></span>
 
 - Install dev dependencies: `uv sync --dev`
+- Build a wheel or sdist with bundled UI assets: `uv build`
 - Lint: `uv run ruff check .`
 - Test: `uv run pytest`
 

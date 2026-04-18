@@ -19,7 +19,8 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["tinytasktree"]
+packages = ["tinytasktree"]
+include-package-data = true
 
 [dependency-groups]
 dev = [

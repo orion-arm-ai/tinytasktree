@@ -117,7 +117,7 @@ async def main() -> None:
     print_tree(root.root_topic, root.tree, max_depth=3)
     storage = FileTraceStorageHandler(".traces")
     trace_id = await storage.save(context.trace_root())
-    print("Trace URL:", f"http://127.0.0.1:5173/{trace_id}")
+    print("Trace URL:", f"http://127.0.0.1:8000/{trace_id}")
 
 
 def print_tree(root: str, tree: dict[str, list[str]], max_depth: int = 3) -> None:

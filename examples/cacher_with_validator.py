@@ -65,7 +65,7 @@ async def run_once(prompt: str) -> str:
     async with context.using_blackboard(blackboard):
         await tree(context)
     trace_id = await storage.save(context.trace_root())
-    print("Trace URL:", f"http://127.0.0.1:5173/{trace_id}")
+    print("Trace URL:", f"http://127.0.0.1:8000/{trace_id}")
     return blackboard.response
 
 
