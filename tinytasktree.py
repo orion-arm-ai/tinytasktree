@@ -173,6 +173,11 @@ from urllib.parse import unquote, urlparse
 from openai import AsyncOpenAI
 
 try:
+    import json_repair
+except ImportError:
+    json_repair = None
+
+try:
     import orjson
 except ImportError:
     orjson = None
@@ -1089,7 +1094,7 @@ _JSON_FENCE = "```"
 _JSON_FENCE_JSON = "```json"
 
 
-def json_loader_default(s: str) -> JSON | None:
+def _strip_json_fences(s: str) -> str:
     s = s.strip()
     if s.startswith(_JSON_FENCE_JSON):
         s = s[len(_JSON_FENCE_JSON) :]
@@ -1097,7 +1102,14 @@ def json_loader_default(s: str) -> JSON | None:
         s = s[len(_JSON_FENCE) :]
     if s.endswith(_JSON_FENCE):
         s = s[: -len(_JSON_FENCE)]
+    return s.strip()
+
+
+def json_loader_default(s: str) -> JSON | None:
+    s = _strip_json_fences(s)
     try:
+        if json_repair is not None:
+            return cast(JSON, json_repair.loads(s))
         return cast(JSON, _json_loads(s))
     except Exception:
         return None
@@ -1147,7 +1159,7 @@ class ParseJSON[B](LeafNode[B]):
 
     @override
     async def _impl(self, context: Context, tracer: Tracer) -> Result:
-        s = self._get_src_data(context)
+        s = _strip_json_fences(self._get_src_data(context))
         tracer.log(f"using json_loader: {_normalized_func_name(self._json_loader)}")
         d = self._json_loader(s)
         if d is None:
@@ -2574,10 +2586,11 @@ class Tree[B](_ForwardingChildNode[B]):
             - `str`: Writes to `blackboard.<dst>`.
             - `Callable`: A setter function `f(blackboard, parsed_data) -> None`.
         :param json_loader: A function to parse json into `JSON | None`, form: `f(str) -> JSON | None`.
-            Defaults to `json_loader_default`, which strips common ```json fences and
-            parses strict JSON. Return `None` to make `ParseJSON` fail gracefully.
-            For LLM-generated or otherwise non-strict JSON, it is recommended to
-            pass an explicit tolerant loader such as one built with `json_repair`.
+            Input text is preprocessed by `ParseJSON` to strip common ```json fences
+            before the loader is called.
+            Defaults to `json_loader_default`, which tries `json_repair` if installed,
+            otherwise `orjson`, otherwise the standard library `json`.
+            Return `None` to make `ParseJSON` fail gracefully.
         :param name: Optional node name.
 
         Example::

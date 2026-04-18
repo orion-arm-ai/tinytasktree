@@ -1,15 +1,14 @@
-"""Parse JSON with an explicit json_repair loader.
+"""Parse JSON with optional json_repair installed.
 
-Demonstrates how to keep tinytasktree free of a json_repair dependency while
-still using json_repair in application code when tolerant parsing is needed.
+Demonstrates default ParseJSON behavior when the optional json_repair package
+is installed. No custom json_loader is needed.
 """
 
 import asyncio
+import importlib.util
 import os
 import sys
 from dataclasses import dataclass
-
-import json_repair
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # ensure tinytasktree is importable
 
@@ -22,22 +21,11 @@ class Blackboard:
     parsed: JSON | None = None
 
 
-def repairing_json_loader(s: str) -> JSON | None:
-    s = s.strip()
-    if s.startswith("```json"):
-        s = s[len("```json") :]
-    elif s.startswith("```"):
-        s = s[len("```") :]
-    if s.endswith("```"):
-        s = s[: -len("```")]
-    return json_repair.loads(s)
-
-
 # fmt: off
 tree = (
     Tree[Blackboard]("ParseJSONWithJsonRepair")
     .Sequence()
-    ._().ParseJSON(src="raw_json", dst="parsed", json_loader=repairing_json_loader)
+    ._().ParseJSON(src="raw_json", dst="parsed")
     .End()
 )
 # fmt: on
@@ -46,6 +34,9 @@ storage = FileTraceStorageHandler(".traces")
 
 
 async def main() -> None:
+    if importlib.util.find_spec("json_repair") is None:
+        raise SystemExit("Install the optional package `json_repair` to run this example.")
+
     context = Context()
     blackboard = Blackboard(raw_json='{"name": "tinytasktree", "year": 2026')
 
