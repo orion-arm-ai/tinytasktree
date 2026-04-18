@@ -444,17 +444,7 @@ tree = (
 Streaming response example:
 
 ```python
-import os
-
-from tinytasktree import LLMModel, LLMProvider, Tree
-
-LLM_BASE_URL = os.getenv("LLM_BASE_URL")
-LLM_API_KEY = os.getenv("LLM_API_KEY")
-provider = LLMProvider(
-    base_url=LLM_BASE_URL or "",
-    api_key=LLM_API_KEY,
-    client_kwargs={"timeout": 30},
-)
+from tinytasktree import Tree
 
 def on_delta(b, full, delta, done, reason=""):
     if delta:
@@ -463,10 +453,7 @@ def on_delta(b, full, delta, done, reason=""):
 tree = (
     Tree()
     .Sequence()
-    ._().LLM(lambda b: LLMModel(b.model, provider=provider), lambda b: b.messages,
-             stream=True, stream_on_delta=on_delta,
-             extra_body={"reasoning": {"enabled": False}},
-             temperature=0.2)
+    ._().LLM(lambda b: b.model, lambda b: b.messages, stream=True, stream_on_delta=on_delta)
     .End()
 )
 ```

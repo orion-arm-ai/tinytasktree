@@ -121,6 +121,7 @@ Author: chao.wang [at] orionarm.ai
 
 import asyncio
 import functools
+import heapq
 import http.server
 import importlib.resources
 import inspect
@@ -489,7 +490,7 @@ class TraceStorageHandler(Protocol):
     async def query(self, trace_id: str) -> JSON:
         """Load a trace by id and return its JSON content."""
 
-    async def list_traces(self) -> list[JSON]:
+    async def list_traces(self, limit: int | None = None) -> list[JSON]:
         """List persisted traces in descending time order."""
 
 
@@ -537,8 +538,8 @@ class FileTraceStorageHandler:
         data = await asyncio.to_thread(self._read_file, path)
         return cast(JSON, _json_loads(data))
 
-    async def list_traces(self) -> list[JSON]:
-        return await asyncio.to_thread(self._list_files)
+    async def list_traces(self, limit: int | None = None) -> list[JSON]:
+        return await asyncio.to_thread(self._list_files, limit)
 
     def _write_file(self, path: str, data: bytes) -> None:
         os.makedirs(self._dirpath, exist_ok=True)
@@ -556,68 +557,44 @@ class FileTraceStorageHandler:
         except ValueError:
             return None
 
-    def _list_files(self) -> "list[JSON]":
+    def _list_files(self, limit: int | None = None) -> "list[JSON]":
         if not os.path.isdir(self._dirpath):
             return []
 
-        entries: list[tuple[datetime, JSON]] = []
-        for name in os.listdir(self._dirpath):
-            if not name.endswith(".json"):
-                continue
-            trace_id = name[:-5]
-            path = os.path.join(self._dirpath, name)
-            try:
-                stat = os.stat(path)
-            except FileNotFoundError:
-                continue
+        selected: list[tuple[datetime, str, str]] = []
+        with os.scandir(self._dirpath) as entries:
+            for entry in entries:
+                name = entry.name
+                if not name.endswith(".json"):
+                    continue
+                trace_id = name[:-5]
+                created_at_dt = self._parse_trace_id_datetime(trace_id)
+                if created_at_dt is None:
+                    try:
+                        stat = entry.stat()
+                    except FileNotFoundError:
+                        continue
+                    created_at_dt = datetime.fromtimestamp(stat.st_mtime)
+                item = (created_at_dt, trace_id, entry.path)
+                if limit is None:
+                    selected.append(item)
+                    continue
+                if limit <= 0:
+                    continue
+                if len(selected) < limit:
+                    heapq.heappush(selected, item)
+                elif item[0] > selected[0][0]:
+                    heapq.heapreplace(selected, item)
 
-            created_at_dt = self._parse_trace_id_datetime(trace_id)
-            if created_at_dt is None:
-                created_at_dt = datetime.fromtimestamp(stat.st_mtime)
-            created_at = created_at_dt.isoformat()
-
-            trace_name = ""
-            try:
-                with open(path, "rb") as f:
-                    payload = cast(JSON, _json_loads(f.read()))
-                if isinstance(payload, dict):
-                    children = payload.get("children")
-                    if isinstance(children, dict) and children:
-                        first_child = next(iter(children.values()))
-                        if isinstance(first_child, dict):
-                            first_name = first_child.get("name")
-                            if isinstance(first_name, str):
-                                stripped = first_name.strip()
-                                matched = re.fullmatch(r"Tree\((.*)\)", stripped)
-                                if matched:
-                                    trace_name = matched.group(1).strip() or "trace"
-                                else:
-                                    trace_name = stripped or "trace"
-                    if not trace_name:
-                        root_name = payload.get("name")
-                        if isinstance(root_name, str):
-                            stripped = root_name.strip()
-                            matched = re.fullmatch(r"Tree\((.*)\)", stripped)
-                            if matched:
-                                trace_name = matched.group(1).strip() or "trace"
-                            else:
-                                trace_name = stripped or "trace"
-            except Exception:
-                trace_name = ""
-
-            entries.append(
-                (
-                    created_at_dt,
-                    {
-                        "id": trace_id,
-                        "name": trace_name,
-                        "created_at": created_at,
-                    },
-                )
-            )
-
-        entries.sort(key=lambda item: item[0], reverse=True)
-        return [item[1] for item in entries]
+        selected.sort(key=lambda item: item[0], reverse=True)
+        return [
+            {
+                "id": trace_id,
+                "name": f"{trace_id}.json",
+                "created_at": created_at_dt.isoformat(),
+            }
+            for created_at_dt, trace_id, _path in selected
+        ]
 
 
 ##############
@@ -3629,6 +3606,7 @@ else:
 
 
 def create_http_app(trace_dir: str = ".traces") -> Any:
+    trace_list_limit = 100
     storage = FileTraceStorageHandler(trace_dir)
     ui_root = _find_bundled_ui_root()
 
@@ -3668,7 +3646,7 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
             self._send_json(HTTPStatus.OK, payload)
 
         def _handle_traces(self) -> None:
-            payload = asyncio.run(storage.list_traces())
+            payload = asyncio.run(storage.list_traces(limit=trace_list_limit))
             self._send_json(HTTPStatus.OK, cast(JSON, payload))
 
         def _handle_ui(self, path: str) -> bool:

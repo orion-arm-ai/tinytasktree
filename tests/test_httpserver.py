@@ -156,7 +156,35 @@ def test_httpserver_lists_traces_desc(monkeypatch, tmp_path: Path):
         assert content_type.startswith("application/json")
         payload = json.loads(body.decode())
         assert [item["id"] for item in payload[:2]] == [trace_id_b, trace_id_a]
-        assert payload[0]["name"] == "Beta Trace"
+        assert payload[0]["name"] == f"{trace_id_b}.json"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_httpserver_limits_trace_list_to_recent_100(monkeypatch, tmp_path: Path):
+    ui_root = tmp_path / "ui_dist"
+    ui_root.mkdir(parents=True)
+    (ui_root / "index.html").write_text("<html><body>tinytasktree ui</body></html>", encoding="utf-8")
+
+    monkeypatch.setattr(tinytasktree, "_find_bundled_ui_root", lambda: ui_root)
+
+    async def _fake_list_traces(self, limit: int | None = None):
+        assert limit == 100
+        return [{"id": f"trace-{i}", "name": f"Trace {i}", "created_at": "2026-04-18T00:00:00"} for i in range(100)]
+
+    monkeypatch.setattr(tinytasktree.FileTraceStorageHandler, "list_traces", _fake_list_traces)
+
+    handler = tinytasktree.create_http_app(str(tmp_path / "traces"))
+    server, thread = _serve(handler)
+    try:
+        status, content_type, body = _request(server, "GET", "/traces")
+        assert status == 200
+        assert content_type.startswith("application/json")
+        payload = json.loads(body.decode())
+        assert len(payload) == 100
+        assert payload[0]["id"] == "trace-0"
     finally:
         server.shutdown()
         server.server_close()
