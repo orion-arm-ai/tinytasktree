@@ -61,7 +61,7 @@ async def main():
 
 - Python 3.13–3.14 (3.15 is not yet supported due to upstream PyO3/fastuuid compatibility)
 - openai-python (only needed for `LLM` nodes)
-- Redis (only needed for `Terminable` and `RedisCacher` nodes)
+- An async key-value store backend is only needed for `Cacher` and `Terminable` nodes
 - Uvicorn (only needed for the HTTP trace server)
 
 ## Features
@@ -70,7 +70,7 @@ async def main():
 - Async-first execution model
 - Leaf / Composite / Decorator nodes built-in
 - LLM integration via openai-python
-- Redis-backed caching and termination signaling
+- Store-backed caching and termination signaling
 - Trace collection and optional trace storage
 - UI trace viewer with HTTP server
 
@@ -149,7 +149,7 @@ VITE_API_BASE_URL=http://127.0.0.1:8000 npm run build
     - [Retry](#retry)
     - [While](#while)
     - [Timeout / Fallback](#timeout--fallback)
-    - [RedisCacher](#rediscacher)
+    - [Cacher](#cacher)
     - [Terminable](#terminable)
     - [Wrapper](#wrapper)
 - [Core APIs (Non-Node)](#core-apis-non-node)
@@ -349,7 +349,7 @@ Parses JSON from the last result or from a blackboard source, and returns the pa
 Usage:
 - `src`: last result (default), blackboard attr, or `(blackboard) -> str`
 - `dst`: optional blackboard attr or `(blackboard, data) -> None`
-- Uses `orjson` with `json-repair` fallback and supports JSON code fences
+- Uses JSON parsing with `json-repair` fallback and supports JSON code fences; prefers `orjson` if installed
 
 ```python
 tree = (
@@ -722,12 +722,12 @@ tree = (
 )
 ```
 
-#### RedisCacher <span id="rediscacher"></span> <a href="#ref">[↑]</a>
+#### Cacher <span id="cacher"></span> <a href="#ref">[↑]</a>
 
-Caches child results in Redis. Optional `value_validator` invalidates stale cache.
+Caches child results in a key-value store. Optional `value_validator` invalidates stale cache.
 
 Usage:
-- `key_func(blackboard) -> str`, optional `redis_client`
+- `key_func(blackboard) -> str`, required `store`
 - `expiration`: seconds, `timedelta`, or random `(min, max)`
 - `value_validator`: `(blackboard)` or `(blackboard, tracer)`
 - `enabled`: bool or `(blackboard) -> bool`
@@ -735,8 +735,25 @@ Usage:
 ```python
 tree = (
     Tree()
-    .RedisCacher(redis_client, key_func=lambda b: b.key, enabled=lambda b: b.use_cache)
+    .Cacher(key_func=lambda b: b.key, store=store, enabled=lambda b: b.use_cache)
     ._().Function(expensive_call)
+    .End()
+)
+```
+
+Redis example:
+
+`tinytasktree` itself does not depend on Redis, but `redis.asyncio.Redis` can be used directly as the `store`:
+
+```python
+import redis.asyncio as redis
+
+store = redis.Redis.from_url("redis://127.0.0.1:6379")
+
+tree = (
+    Tree()
+    .Cacher(key_func=lambda b: f"user:{b.user_id}", store=store, expiration=60)
+    ._().Function(fetch_user)
     .End()
 )
 ```
@@ -747,7 +764,7 @@ value matches the one stored during the cache set. Useful for invalidating cache
 ```python
 tree = (
     Tree()
-    .RedisCacher(redis_client, key_func=lambda b: f"user:{b.user_id}", value_validator=lambda b: b.version)
+    .Cacher(key_func=lambda b: f"user:{b.user_id}", store=store, value_validator=lambda b: b.version)
     ._().Function(fetch_user)
     .End()
 )
@@ -755,17 +772,17 @@ tree = (
 
 #### Terminable <span id="terminable"></span> <a href="#ref">[↑]</a>
 
-Runs a child while polling a Redis key for termination. Optionally runs a fallback.
+Runs a child while polling a store key for termination. Optionally runs a fallback.
 
 Usage:
-- `key_func(blackboard) -> redis_key`, optional `redis_client`
+- `key_func(blackboard) -> signal_key`, required `store`
 - Monitors until key exists; then cancels child
 - 1 child (main) or 2 (main + fallback)
 
 ```python
 tree = (
     Tree()
-    .Terminable(lambda b: f"stop:{b.job_id}")
+    .Terminable(lambda b: f"stop:{b.job_id}", store=store)
     ._().Function(A)
     ._().Fallback()
     ._()._().Function(B)
@@ -811,14 +828,13 @@ tree = (
 - `TraceStorageHandler` / `FileTraceStorageHandler`: save and load traces
 - `register_global_hook_after_spawned_task_finish(hook)`: hook for Parallel/Gather/Terminable tasks
 - `set_default_llm_api_key_factory(factory_or_key)`: default LLM API key or factory
-- `set_default_global_redis_client(url, **kwargs)`: global Redis client for Redis nodes
 - `run_httpserver(host, port, trace_dir)` / `create_http_app(...)`: built-in HTTP trace server
 
 ## Contributing <span id="contributing"></span>
 
 - Install dev dependencies: `uv sync --dev`
 - Lint: `uv run ruff check .`
-- Test: `uv run pytest` (requires a local Redis on `redis://127.0.0.1:6379`)
+- Test: `uv run pytest`
 
 ## License <span id="license"></span>
 

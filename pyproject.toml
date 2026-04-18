@@ -8,10 +8,8 @@ classifiers = [
     "Development Status :: 3 - Alpha",
 ]
 dependencies = [
-    "orjson>=3.11.5",
     "json-repair>=0.55.0",
     "openai>=1.0.0",
-    "redis>=7.1.0",
 ]
 
 [project.urls]

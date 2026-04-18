@@ -1,6 +1,6 @@
 """Terminable LLM with streaming and cancel signal.
 
-Runs a streaming LLM node and lets you cancel it any time via Redis; on cancel,
+Runs a streaming LLM node and lets you cancel it any time via a store key; on cancel,
 the fallback node marks the response as cancelled.
 """
 
@@ -19,7 +19,7 @@ from tinytasktree import JSON, Context, FileTraceStorageHandler, Result, Tree
 
 # Requirements:
 #   - LLM_BASE_URL and LLM_API_KEY set for your LLM service
-#   - Redis running and REDIS_URL set (default: redis://127.0.0.1:6379)
+#   - redis-py installed and Redis running, with REDIS_URL set (default: redis://127.0.0.1:6379)
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY")
 
@@ -63,7 +63,7 @@ redis = async_redis.Redis.from_url(redis_url)
 # fmt: off
 tree = (
     Tree[Blackboard]("TerminableLLM")
-    .Terminable(cancel_key, redis)
+    .Terminable(cancel_key, store=redis)
     ._().Sequence()
     ._()._().LLM("qwen/qwen3.6-plus", make_messages, stream=True, stream_on_delta=on_delta, base_url=LLM_BASE_URL, api_key=LLM_API_KEY, reasoning={"enabled": False})
     ._()._().WriteBlackboard(write_response)

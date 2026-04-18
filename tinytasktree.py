@@ -70,7 +70,7 @@ Decorator Nodes:
     * .Retry()
     * .While()
     * .Timeout() / .Fallback()
-    * .RedisCacher()
+    * .Cacher()
     * .Terminable()
     * .Wrapper()
 Composite Nodes:
@@ -138,6 +138,7 @@ import asyncio
 import functools
 import http.server
 import inspect
+import json
 import logging
 import os
 import pickle
@@ -171,8 +172,11 @@ from urllib.parse import unquote, urlparse
 
 import json_repair
 from openai import AsyncOpenAI
-import orjson
-import redis.asyncio as async_redis
+
+try:
+    import orjson
+except ImportError:
+    orjson = None
 
 __all__ = (
     "AnyB",
@@ -198,11 +202,49 @@ __all__ = (
 )
 
 
+def _json_loads(data: str | bytes | bytearray) -> Any:
+    if orjson is not None:
+        return orjson.loads(data)
+    if isinstance(data, bytearray):
+        data = bytes(data)
+    return json.loads(data)
+
+
+def _json_dumps(
+    data: Any,
+    *,
+    default: Callable[[Any], Any] | None = None,
+    indent: int | None = None,
+) -> bytes:
+    if orjson is not None:
+        option = orjson.OPT_INDENT_2 if indent == 2 else 0
+        if default is None:
+            return orjson.dumps(data, option=option)
+        return orjson.dumps(data, default=default, option=option)
+    return json.dumps(
+        data,
+        default=default,
+        indent=indent,
+        ensure_ascii=False,
+        separators=(",", ":") if indent is None else None,
+    ).encode("utf-8")
+
+
 ##############
 # Common Types
 ##############
 
 type JSON = dict[str, Any]
+
+
+class AsyncKeyValueStore(Protocol):
+    async def get(self, key: str) -> Any: ...
+
+    async def set(self, key: str, value: Any, ex: int | float | timedelta | None = None) -> Any: ...
+
+    async def delete(self, key: str) -> Any: ...
+
+    async def exists(self, key: str) -> Any: ...
 
 
 class TasktreeError(Exception): ...
@@ -363,7 +405,7 @@ class TraceNode:
             _merge_token_fields(tokens, prompt, completion, total)
         elif isinstance(tokens_value, str) and tokens_value:
             try:
-                parsed = orjson.loads(tokens_value)
+                parsed = _json_loads(tokens_value)
                 if isinstance(parsed, dict):
                     prompt = _as_int(parsed.get("prompt"))
                     completion = _as_int(parsed.get("completion"))
@@ -430,14 +472,14 @@ class FileTraceStorageHandler:
     async def save(self, trace_root: TraceRoot) -> str:
         trace_id = uuid.uuid4().hex
         path = self._path_for(trace_id)
-        data = orjson.dumps(trace_root.json(), option=orjson.OPT_INDENT_2)
+        data = _json_dumps(trace_root.json(), indent=2)
         await asyncio.to_thread(self._write_file, path, data)
         return trace_id
 
     async def query(self, trace_id: str) -> JSON:
         path = self._path_for(trace_id)
         data = await asyncio.to_thread(self._read_file, path)
-        return cast(JSON, orjson.loads(data))
+        return cast(JSON, _json_loads(data))
 
     def _write_file(self, path: str, data: bytes) -> None:
         os.makedirs(self._dirpath, exist_ok=True)
@@ -1057,7 +1099,7 @@ def json_loader_trying_repair(s: str) -> JSON:
     if s.endswith(_JSON_FENCE):
         s = s[: -len(_JSON_FENCE)]
     try:
-        return orjson.loads(s)
+        return cast(JSON, _json_loads(s))
     except Exception:
         return cast(JSON, json_repair.loads(s))
 
@@ -1934,7 +1976,7 @@ class FallbackNode[B](_ForwardingChildNode[B]):
             raise TasktreeProgrammingError(f"{self.fullname}: Fallback's parent must be one of [Timeout, Terminable]")
 
 
-type TerminableRedisKeyFunction[B] = Callable[[B], str]
+type TerminableKeyFunction[B] = Callable[[B], str]
 
 
 @final
@@ -1943,8 +1985,8 @@ class TerminableDecoratorNode[B](CompositeNode[B], DecoratorNode[B]):
 
     def __init__(
         self,
-        key_func: TerminableRedisKeyFunction,
-        redis_client: async_redis.Redis | None = None,
+        key_func: TerminableKeyFunction[B],
+        store: AsyncKeyValueStore | None = None,
         monitor_interval_ms: float = 500,  # ms
         name: str = "",
     ):
@@ -1952,7 +1994,7 @@ class TerminableDecoratorNode[B](CompositeNode[B], DecoratorNode[B]):
         CompositeNode.__init__(self, None, name)
         self._key_func = key_func
         self._monitor_interval_ms = monitor_interval_ms
-        self._redis_client = redis_client or _DEFAULT_GLOBAL_REDIS_INSTANCE
+        self._store = store
 
     @override
     def OnBuildEnd(self) -> None:
@@ -1960,18 +2002,18 @@ class TerminableDecoratorNode[B](CompositeNode[B], DecoratorNode[B]):
         CompositeNode.OnBuildEnd(self)
         if len(self.children()) not in {1, 2}:
             raise TasktreeProgrammingError(f"{self.fullname}: must have 1 or 2 children")
-        if not self._redis_client:
-            raise TasktreeError(f"{self.fullname}: must provide a redis_client instance")
+        if not self._store:
+            raise TasktreeError(f"{self.fullname}: must provide a store instance")
 
     async def _monitor_termination_signal(self, context: Context) -> None:
-        assert self._redis_client
+        assert self._store
         b = cast(B, context._current_blackboard())
         k = self._key_func(b)
         # We first clear the key, ensures everything is clean.
-        await self._redis_client.delete(k)
+        await self._store.delete(k)
         while True:
-            if await self._redis_client.exists(k):
-                await self._redis_client.delete(k)
+            if await self._store.exists(k):
+                await self._store.delete(k)
                 return
             await asyncio.sleep(self._monitor_interval_ms / 1000.0)
 
@@ -2013,34 +2055,34 @@ class TerminableDecoratorNode[B](CompositeNode[B], DecoratorNode[B]):
         return Result.FAIL(None)
 
 
-type RedisCacherKeyFunction[B] = Callable[[B], str]  # function(blackboard) -> key
+type CacherKeyFunction[B] = Callable[[B], str]  # function(blackboard) -> key
 #  # function(blackboard [, tracer]) -> value_validator_string
-type RedisCacherValueValidator1[B] = Callable[[B], str]
-type RedisCacherValueValidator2[B] = Callable[[B, Tracer], str]
-type RedisCacherValueValidator[B] = RedisCacherValueValidator1[B] | RedisCacherValueValidator2[B]
+type CacherValueValidator1[B] = Callable[[B], str]
+type CacherValueValidator2[B] = Callable[[B, Tracer], str]
+type CacherValueValidator[B] = CacherValueValidator1[B] | CacherValueValidator2[B]
 # seconds (int | float), timedelta, random in [min_timedelta, max_timedelta]
 type Cache_Expiration = int | float | timedelta | tuple[timedelta, timedelta]
 # function(blackboard) -> bool
-type RedisCacherEnabledFunction[B] = Callable[[B], bool]
+type CacherEnabledFunction[B] = Callable[[B], bool]
 
 
 @final
-class RedisCacherNode[B](SingleChildNode[B], DecoratorNode[B]):
-    KIND = "RedisCacher"
+class CacherNode[B](SingleChildNode[B], DecoratorNode[B]):
+    KIND = "Cacher"
 
     def __init__(
         self,
-        key_func: RedisCacherKeyFunction[B],
-        redis_client: async_redis.Redis | None = None,
+        key_func: CacherKeyFunction[B],
+        store: AsyncKeyValueStore | None = None,
         expiration: Cache_Expiration = timedelta(hours=1),
-        value_validator: RedisCacherValueValidator[B] | None = None,
-        enabled: bool | RedisCacherEnabledFunction[B] = True,
+        value_validator: CacherValueValidator[B] | None = None,
+        enabled: bool | CacherEnabledFunction[B] = True,
         name: str = "",
     ) -> None:
         DecoratorNode.__init__(self, name)
         SingleChildNode.__init__(self, None, name)
         self._key_func = key_func
-        self._redis_client = redis_client or _DEFAULT_GLOBAL_REDIS_INSTANCE
+        self._store = store
         self._value_validator = value_validator
         self._value_validator_params_cnt = _inspect_func_parameters_count(value_validator) if value_validator else 0
         self._ex = expiration
@@ -2053,13 +2095,13 @@ class RedisCacherNode[B](SingleChildNode[B], DecoratorNode[B]):
         if self._value_validator:
             if self._value_validator_params_cnt not in {1, 2}:
                 raise TasktreeProgrammingError(f"{self.fullname}: value_validator params count invalid")
-        if not self._redis_client:
-            raise TasktreeError(f"{self.fullname}: must provide a redis_client instance")
+        if not self._store:
+            raise TasktreeError(f"{self.fullname}: must provide a store instance")
 
     def _compute_enabled(self, context: Context) -> bool:
         if callable(self._enabled):  # function(blackboard) -> bool
             b = cast(B, context._current_blackboard())
-            func = cast(RedisCacherEnabledFunction[B], self._enabled)
+            func = cast(CacherEnabledFunction[B], self._enabled)
             return func(b)
         return self._enabled  # bool
 
@@ -2077,51 +2119,65 @@ class RedisCacherNode[B](SingleChildNode[B], DecoratorNode[B]):
             )
             secs = random.randint(min_t_secs, max_t_secs)
             return timedelta(seconds=secs)
-        raise TasktreeProgrammingError("RedisCacher: invalid expiration param")
+        raise TasktreeProgrammingError("Cacher: invalid expiration param")
 
     def _compute_value_validator(self, context: Context, tracer: Tracer) -> str:
         b = cast(B, context._current_blackboard())
         if self._value_validator_params_cnt == 1:
-            return cast(RedisCacherValueValidator1[B], self._value_validator)(b)
+            return cast(CacherValueValidator1[B], self._value_validator)(b)
         elif self._value_validator_params_cnt == 2:
-            return cast(RedisCacherValueValidator2[B], self._value_validator)(b, tracer)
+            return cast(CacherValueValidator2[B], self._value_validator)(b, tracer)
         return ""  # won't happen
 
     @override
     async def _impl(self, context: Context, tracer: Tracer) -> Result:
-        assert self._redis_client
+        assert self._store
         enabled = self._compute_enabled(context)
         child = self.child()
         b = cast(B, context._current_blackboard())
         k = self._key_func(b)
         validation = str(self._compute_value_validator(context, tracer)) if self._value_validator else ""
+        tracer.update_attributes(cache_key=k, cache_enabled=enabled)
+        if self._value_validator:
+            tracer.update_attributes(cache_validation=validation)
 
         if enabled:
-            w = await self._redis_client.get(k)
+            w = await self._store.get(k)
             if w:
                 try:
                     x = pickle.loads(w)
                     if self._value_validator:  # Need validation
                         if x["validation"] == validation:
                             # Succeeds only if key exists and validation pass.
+                            tracer.update_attributes(cache_status="hit", cache_hit=True)
                             tracer.log(f"cache hit, key: {k}, validation: {validation}")
                             return Result.OK(x["value"])
                         else:
+                            tracer.update_attributes(
+                                cache_status="invalidated",
+                                cache_hit=False,
+                                cache_validation_stored=x["validation"],
+                            )
                             tracer.log(
                                 "cache key found, but validation value changed: "
                                 + x["validation"]
                                 + f"(expect: {validation})=> deleting key {k}"
                             )
-                            await self._redis_client.delete(k)
+                            await self._store.delete(k)
                     else:
                         # No validation, directly returns the cached value
+                        tracer.update_attributes(cache_status="hit", cache_hit=True)
+                        tracer.log(f"cache hit, key: {k}")
                         return Result.OK(x["value"])
                 except Exception as e:
                     # (KeyError, pickle.UnpicklingError)
+                    tracer.update_attributes(cache_status="decode_error", cache_hit=False)
                     tracer.error(f"{e} => miss")
             else:
+                tracer.update_attributes(cache_status="miss", cache_hit=False)
                 tracer.log(f"cache miss, key: {k}")
         else:
+            tracer.update_attributes(cache_status="disabled", cache_hit=False)
             tracer.log("cache disabled")
 
         async with context._forward(child.fullname):
@@ -2132,7 +2188,8 @@ class RedisCacherNode[B](SingleChildNode[B], DecoratorNode[B]):
             ex = self._compute_ex()
             x1 = {"value": result.data, "validation": validation}
             w = pickle.dumps(x1)
-            await self._redis_client.set(k, w, ex=ex)
+            await self._store.set(k, w, ex=ex)
+            tracer.update_attributes(cache_written=True, cache_expires_in_secs=int(ex.total_seconds()))
             tracer.log(f"cache set (on ok), ex: {int(ex.total_seconds())}s, validation: {validation}")
         return result
 
@@ -2519,7 +2576,7 @@ class Tree[B](_ForwardingChildNode[B]):
             - `Callable`: A setter function `f(blackboard, parsed_data) -> None`.
         :param json_loader: A function to parse json into `JSON`, form: `f(str) -> JSON`.
             Defaults to `json_loader_trying_repair`, which strips common ```json fences and
-            tries `json_repair` on orjson load failure.
+            tries `json_repair` on JSON parse failure.
         :param name: Optional node name.
 
         Example::
@@ -2825,25 +2882,23 @@ class Tree[B](_ForwardingChildNode[B]):
         """
         return self._attach(WrapperNode(func, name))
 
-    def RedisCacher(
+    def Cacher(
         self,
-        key_func: RedisCacherKeyFunction[B],
-        redis_client: async_redis.Redis | None = None,
+        key_func: CacherKeyFunction[B],
+        store: AsyncKeyValueStore | None = None,
         expiration: Cache_Expiration = timedelta(hours=1),
-        value_validator: RedisCacherValueValidator[B] | None = None,
-        enabled: bool | RedisCacherEnabledFunction[B] = True,
+        value_validator: CacherValueValidator[B] | None = None,
+        enabled: bool | CacherEnabledFunction[B] = True,
         name: str = "",
     ) -> Self:
         """
-        Caches the child node's result in Redis (Decorator).
-        Available only if module `redis.asyncio` is installed.
+        Caches the child node's result in a key-value store (Decorator).
 
         - Status/Data: If a valid cache entry exists, returns `OK(cached_data)`.
-          Otherwise, executes the child and stores its result in Redis if it returns `OK`.
+          Otherwise, executes the child and stores its result if it returns `OK`.
 
         :param key_func: Factory function `f(blackboard) -> str` to generate the cache key.
-        :param redis_client: An asynchronous Redis client instance.
-            defaults to `_DEFAULT_GLOBAL_REDIS_INSTANCE` (which can be set by `set_default_global_redis_client()`)
+        :param store: An asynchronous key-value store instance implementing `AsyncKeyValueStore`.
         :param expiration: Cache TTL. Supports:
             - `int` or `float`: Seconds.
             - `timedelta`: Fixed duration.
@@ -2858,40 +2913,48 @@ class Tree[B](_ForwardingChildNode[B]):
 
             Tree()
             .Sequence()
-            ._().RedisCacher(redis_client,
-                             key_func=lambda b: f"user_data:{b.user_id}",
-                             expiration=(timedelta(minutes=5), timedelta(minutes=10)), # Random jitter
-                             value_validator=lambda b: b.version_tag # Invalidate if version changes
-                            )
+            ._().Cacher(key_func=lambda b: f"user_data:{b.user_id}",
+                        store=store,
+                        expiration=(timedelta(minutes=5), timedelta(minutes=10)), # Random jitter
+                        value_validator=lambda b: b.version_tag # Invalidate if version changes
+                       )
             ._()._().Function(fetch_expensive_data)
             .End()
         """
-        return self._attach(RedisCacherNode(key_func, redis_client, expiration, value_validator, enabled, name))
+        return self._attach(
+            CacherNode(
+                key_func,
+                store,
+                expiration,
+                value_validator,
+                enabled,
+                name,
+            )
+        )
 
     def Terminable(
         self,
-        key_func: TerminableRedisKeyFunction,
-        redis_client: async_redis.Redis | None = None,
+        key_func: TerminableKeyFunction[B],
+        store: AsyncKeyValueStore | None = None,
         monitor_interval_ms: float = 500,  # ms
         name: str = "",
     ) -> Self:
         """
-        Decorator that allows external interruption of a task via a Redis key.
+        Decorator that allows external interruption of a task via a store key.
 
         - First child: The main task to execute.
         - Second child (optional): The fallback task to execute if interrupted.
 
         Behavior:
-        1. Simultaneously runs the main task and polls a Redis key (generated by `key_func`).
+        1. Simultaneously runs the main task and polls a store key (generated by `key_func`).
         2. If the main task finishes first, its result is returned.
-        3. If the Redis key is created (external signal), the main task is cancelled immediately.
+        3. If the store key is created (external signal), the main task is cancelled immediately.
         4. Upon interruption, it executes the fallback child (if provided) or returns `FAIL(None)`.
-        5. Note: The monitored Redis key is automatically deleted when the node starts and when a signal is detected.
+        5. Note: The monitored signal key is automatically deleted when the node starts and when a signal is detected.
 
         :param key_func: Factory function `f(blackboard) -> str` to generate the termination signal key.
-        :param redis_client: An asynchronous Redis client instance.
-            defaults to `_DEFAULT_GLOBAL_REDIS_INSTANCE` (which can be set by `set_default_global_redis_client()`)
-        :param monitor_interval_ms: Polling interval in milliseconds to check for the Redis key.
+        :param store: An asynchronous key-value store instance implementing `AsyncKeyValueStore`.
+        :param monitor_interval_ms: Polling interval in milliseconds to check for the signal key.
         :param name: Optional node name.
 
         Example::
@@ -2899,7 +2962,7 @@ class Tree[B](_ForwardingChildNode[B]):
             # 1. Building the tree
             tree = (
                 Tree()
-                .Terminable(redis, lambda b: f"stop:{b.job_id}")
+                .Terminable(lambda b: f"stop:{b.job_id}", store=store)
                 ._().Function(long_running_job)      # First child
                 ._().Fallback()
                 ._()._().Function(on_interrupted)    # Optional fallback on interruption.
@@ -2907,9 +2970,9 @@ class Tree[B](_ForwardingChildNode[B]):
             )
 
             # 2. To trigger termination from an external script or process:
-            await redis.set(f"stop:{job_id}", "1")
+            await store.set(f"stop:{job_id}", "1")
         """
-        return self._attach(TerminableDecoratorNode(key_func, redis_client, monitor_interval_ms, name))
+        return self._attach(TerminableDecoratorNode(key_func, store, monitor_interval_ms, name))
 
     ##########################
     # Builder :: CompositeNode
@@ -3096,27 +3159,6 @@ class Tree[B](_ForwardingChildNode[B]):
         """
         return self._attach(ElseNode[B](name))
 
-
-#############
-# Redis
-##############
-
-_DEFAULT_GLOBAL_REDIS_INSTANCE: async_redis.Redis | None
-
-
-def set_default_global_redis_client(url: str, **kwargs) -> None:
-    """Sets the default global redis_client.
-    We ensures it's threading safe.
-
-    Example::
-        tinytasktree.set_default_global_redis_client("redis://127.0.0.1:6379")
-    """
-    global _DEFAULT_GLOBAL_REDIS_INSTANCE
-    _DEFAULT_GLOBAL_REDIS_INSTANCE = cast(
-        async_redis.Redis, ThreadLocalProxy(lambda: async_redis.Redis.from_url(url, **kwargs))
-    )
-
-
 #############
 # Global Hooks
 #############
@@ -3169,7 +3211,7 @@ def _inspect_func_parameters_count(func: Callable) -> int:
     return len(sig.parameters)
 
 
-def _orjson_default_serializer(obj: Any):
+def _json_default_serializer(obj: Any):
     if isinstance(obj, set):
         return list(obj)
     elif isinstance(obj, datetime):
@@ -3190,14 +3232,14 @@ def _orjson_default_serializer(obj: Any):
 def _try_to_string(data: Any) -> str:
     if isinstance(data, dict):
         try:
-            return orjson.dumps(data).decode()
+            return _json_dumps(data).decode()
         except Exception:
             return str(data)
     if isinstance(data, list):
         return "[" + (",".join([_try_to_string(x) for x in data])) + "]"
     if is_dataclass(data):
         try:
-            return orjson.dumps(data, default=_orjson_default_serializer).decode()  # type: ignore
+            return _json_dumps(data, default=_json_default_serializer).decode()  # type: ignore
         except Exception:
             return str(data)
     return str(data)
@@ -3439,7 +3481,7 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
                 raise TasktreeError("invalid Content-Length")
             data = self.rfile.read(content_length)
             try:
-                payload = orjson.loads(data)
+                payload = _json_loads(data)
             except Exception as e:
                 raise TasktreeError(f"invalid json body: {e}") from e
             if not isinstance(payload, dict):
@@ -3468,7 +3510,7 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
             )
 
         def _send_json(self, status: int, payload: JSON) -> None:
-            body = orjson.dumps(payload, default=_orjson_default_serializer)
+            body = _json_dumps(payload, default=_json_default_serializer)
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
