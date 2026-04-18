@@ -148,7 +148,9 @@ import mimetypes
 import os
 import pickle
 import random
+import re
 import reprlib
+import threading
 import uuid
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
@@ -505,6 +507,9 @@ class TraceStorageHandler(Protocol):
     async def query(self, trace_id: str) -> JSON:
         """Load a trace by id and return its JSON content."""
 
+    async def list_traces(self) -> list[JSON]:
+        """List persisted traces in descending time order."""
+
 
 class FileTraceStorageHandler:
     def __init__(self, dirpath: str = ".traces") -> None:
@@ -513,8 +518,33 @@ class FileTraceStorageHandler:
     def _path_for(self, trace_id: str) -> str:
         return os.path.join(self._dirpath, f"{trace_id}.json")
 
+    def _normalize_trace_name(self, name: str) -> str:
+        stripped = name.strip()
+        matched = re.fullmatch(r"Tree\((.*)\)", stripped)
+        if matched:
+            inner = matched.group(1).strip()
+            return inner or "trace"
+        return stripped or "trace"
+
+    def _derive_trace_name(self, trace_root: TraceRoot) -> str:
+        if trace_root.children:
+            first_child = next(iter(trace_root.children.values()))
+            if first_child.name:
+                return self._normalize_trace_name(first_child.name)
+        return self._normalize_trace_name(trace_root.name or "trace")
+
+    def _slugify_trace_name(self, name: str, max_len: int = 24) -> str:
+        normalized = re.sub(r"\s+", "-", name.strip().lower())
+        normalized = re.sub(r"[^a-z0-9_-]+", "-", normalized)
+        normalized = normalized.strip("-_")
+        if not normalized:
+            normalized = "trace"
+        return normalized[:max_len].rstrip("-_") or "trace"
+
     async def save(self, trace_root: TraceRoot) -> str:
-        trace_id = uuid.uuid4().hex
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        slug = self._slugify_trace_name(self._derive_trace_name(trace_root))
+        trace_id = f"{ts}-{slug}-{uuid.uuid4().hex[:8]}"
         path = self._path_for(trace_id)
         data = _json_dumps(trace_root.json(), indent=2)
         await asyncio.to_thread(self._write_file, path, data)
@@ -525,6 +555,9 @@ class FileTraceStorageHandler:
         data = await asyncio.to_thread(self._read_file, path)
         return cast(JSON, _json_loads(data))
 
+    async def list_traces(self) -> list[JSON]:
+        return await asyncio.to_thread(self._list_files)
+
     def _write_file(self, path: str, data: bytes) -> None:
         os.makedirs(self._dirpath, exist_ok=True)
         with open(path, "wb") as f:
@@ -533,6 +566,66 @@ class FileTraceStorageHandler:
     def _read_file(self, path: str) -> bytes:
         with open(path, "rb") as f:
             return f.read()
+
+    def _parse_trace_id_datetime(self, trace_id: str) -> datetime | None:
+        prefix = trace_id[:22]
+        try:
+            return datetime.strptime(prefix, "%Y%m%d-%H%M%S-%f")
+        except ValueError:
+            return None
+
+    def _list_files(self) -> "list[JSON]":
+        if not os.path.isdir(self._dirpath):
+            return []
+
+        entries: list[tuple[datetime, JSON]] = []
+        for name in os.listdir(self._dirpath):
+            if not name.endswith(".json"):
+                continue
+            trace_id = name[:-5]
+            path = os.path.join(self._dirpath, name)
+            try:
+                stat = os.stat(path)
+            except FileNotFoundError:
+                continue
+
+            created_at_dt = self._parse_trace_id_datetime(trace_id)
+            if created_at_dt is None:
+                created_at_dt = datetime.fromtimestamp(stat.st_mtime)
+            created_at = created_at_dt.isoformat()
+
+            trace_name = ""
+            try:
+                with open(path, "rb") as f:
+                    payload = cast(JSON, _json_loads(f.read()))
+                if isinstance(payload, dict):
+                    children = payload.get("children")
+                    if isinstance(children, dict) and children:
+                        first_child = next(iter(children.values()))
+                        if isinstance(first_child, dict):
+                            first_name = first_child.get("name")
+                            if isinstance(first_name, str):
+                                trace_name = self._normalize_trace_name(first_name)
+                    if not trace_name:
+                        root_name = payload.get("name")
+                        if isinstance(root_name, str):
+                            trace_name = self._normalize_trace_name(root_name)
+            except Exception:
+                trace_name = ""
+
+            entries.append(
+                (
+                    created_at_dt,
+                    {
+                        "id": trace_id,
+                        "name": trace_name,
+                        "created_at": created_at,
+                    },
+                )
+            )
+
+        entries.sort(key=lambda item: item[0], reverse=True)
+        return [item[1] for item in entries]
 
 
 ##############
@@ -3490,6 +3583,9 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
 
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
+            if parsed.path == "/traces":
+                self._handle_traces()
+                return
             if parsed.path.startswith("/trace/"):
                 trace_id = unquote(parsed.path.removeprefix("/trace/"))
                 self._handle_trace(trace_id)
@@ -3513,6 +3609,10 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
                 self._send_json(HTTPStatus.NOT_FOUND, {"detail": str(e)})
                 return
             self._send_json(HTTPStatus.OK, payload)
+
+        def _handle_traces(self) -> None:
+            payload = asyncio.run(storage.list_traces())
+            self._send_json(HTTPStatus.OK, cast(JSON, payload))
 
         def _handle_ui(self, path: str) -> bool:
             if ui_root is None:

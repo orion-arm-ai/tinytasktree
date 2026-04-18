@@ -95,6 +95,17 @@ body {
   letter-spacing: 0.2px;
 }
 
+.brand-button {
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+}
+
+.brand-button:hover .brand {
+  color: #ffffff !important;
+}
+
 .search-box {
   position: relative;
   flex: 1;
@@ -264,6 +275,86 @@ body {
   place-items: center;
   color: var(--muted);
   font-size: 16px;
+}
+
+.trace-home {
+  padding: 24px;
+  display: block;
+  overflow: auto;
+}
+
+.trace-list-card {
+  width: min(960px, 100%);
+  margin: 0 auto;
+  background: var(--panel-strong) !important;
+  border-color: var(--line) !important;
+  box-shadow: var(--shadow);
+}
+
+.trace-list-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.trace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.trace-list-item {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: linear-gradient(180deg, rgba(15, 24, 46, 0.96), rgba(10, 17, 34, 0.98));
+  color: var(--ink);
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  cursor: pointer;
+  text-align: left;
+}
+
+.trace-list-item:hover {
+  border-color: rgba(96, 165, 250, 0.5);
+  background: linear-gradient(180deg, rgba(20, 31, 60, 0.98), rgba(12, 20, 40, 1));
+}
+
+.trace-list-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.trace-list-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.trace-list-id {
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.trace-list-time {
+  font-size: 12px;
+  color: #bfd0ea;
+  white-space: nowrap;
+}
+
+.trace-list-empty {
+  padding: 20px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  color: var(--muted);
+  background: rgba(12, 19, 39, 0.6);
 }
 
 .stack-view {

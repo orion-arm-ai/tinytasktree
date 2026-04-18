@@ -10,6 +10,10 @@ from setuptools.command.sdist import sdist as _sdist
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 
+def _log(message: str) -> None:
+    print(f"[setup.py] {message}", flush=True)
+
+
 class build_py(_build_py):
     def run(self) -> None:
         self._reset_build_lib()
@@ -25,12 +29,15 @@ class build_py(_build_py):
         root = Path(__file__).resolve().parent
         src = root / "ui" / "dist"
         if not src.is_dir():
+            _log(f"skip copying UI bundle: missing {src}")
             return
 
         dst = Path(self.build_lib) / "tinytasktree" / "ui_dist"
+        _log(f"copy UI bundle: {src} -> {dst}")
         if dst.exists():
             shutil.rmtree(dst)
         shutil.copytree(src, dst)
+        _log("copied UI bundle")
 
 
 def _build_frontend() -> None:
@@ -39,6 +46,7 @@ def _build_frontend() -> None:
     ui_src = ui_dir / "src"
     ui_dist = ui_dir / "dist"
     if not ui_src.is_dir():
+        _log(f"skip frontend build: missing {ui_src}")
         return
 
     npm = shutil.which("npm")
@@ -47,11 +55,16 @@ def _build_frontend() -> None:
 
     if not (ui_dir / "node_modules").is_dir():
         install_cmd = [npm, "ci"] if (ui_dir / "package-lock.json").is_file() else [npm, "install"]
+        _log(f"install frontend deps: cwd={ui_dir} cmd={' '.join(install_cmd)}")
         subprocess.run(install_cmd, cwd=ui_dir, check=True)
+    else:
+        _log(f"reuse frontend deps: {ui_dir / 'node_modules'}")
 
+    _log(f"build frontend: cwd={ui_dir} cmd={npm} run build")
     subprocess.run([npm, "run", "build"], cwd=ui_dir, check=True)
     if not ui_dist.joinpath("index.html").is_file():
         raise RuntimeError("UI build completed, but ui/dist/index.html was not produced")
+    _log(f"frontend build complete: {ui_dist}")
 
 
 class sdist(_sdist):

@@ -245,6 +245,12 @@ type TokenUsage = {
     total?: number;
 };
 
+type TraceListItem = {
+    id: string;
+    name: string;
+    created_at: string;
+};
+
 const SUBTREE_COLORS = [
     "#ea580c",
     "#0ea5e9",
@@ -620,6 +626,12 @@ function formatCost(cost: number): string {
     return `$${cost.toFixed(6)}`;
 }
 
+function formatTraceListDate(value: string): string {
+    const ts = Date.parse(value);
+    if (Number.isNaN(ts)) return value;
+    return new Date(ts).toLocaleString();
+}
+
 function formatStackDuration(value: number): string {
     if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 1 : 2)}s`;
     if (value >= 100) return `${value.toFixed(0)}ms`;
@@ -843,6 +855,8 @@ function copyText(text: string) {
 
 function TraceUI() {
     const [trace, setTrace] = useState<TraceNodeJson | null>(null);
+    const [traceList, setTraceList] = useState<TraceListItem[]>([]);
+    const [traceListLoading, setTraceListLoading] = useState(false);
     const [viewMode, setViewMode] = useState<"flow" | "stack">("stack");
     const [compactMode, setCompactMode] = useState(true);
     const [stackOrderMode, setStackOrderMode] = useState<"tree" | "time" | "cost" | "error">("tree");
@@ -910,13 +924,46 @@ function TraceUI() {
         const pathId = window.location.pathname.replace(/^\/+/, "");
         if (pathId) {
             void loadTrace(pathId);
+            return;
         }
-        // no selector to refresh
+        void loadTraceList();
+    }, []);
+
+    const loadTraceList = useCallback(async () => {
+        setTraceListLoading(true);
+        setLoadError(null);
+        setTrace(null);
+        setSelectedId(null);
+        try {
+            const resp = await fetch(apiUrl("/traces"));
+            if (!resp.ok) {
+                let detail = `Failed to load traces: ${resp.status}`;
+                try {
+                    const errBody = await resp.json();
+                    if (typeof errBody?.error === "string" && errBody.error) detail = errBody.error;
+                    else if (typeof errBody?.detail === "string" && errBody.detail) detail = errBody.detail;
+                } catch {
+                    // ignore
+                }
+                throw new Error(detail);
+            }
+            const data = (await resp.json()) as TraceListItem[];
+            setTraceList(Array.isArray(data) ? data : []);
+            if (window.location.pathname !== "/") {
+                window.history.replaceState({}, "", "/");
+            }
+        } catch (err) {
+            setLoadError(err instanceof Error ? err.message : "Unknown error");
+            setTraceList([]);
+        } finally {
+            setTraceListLoading(false);
+        }
     }, []);
 
     const loadTrace = useCallback(async (id: string) => {
         setLoadError(null);
         setTrace(null);
+        setTraceList([]);
         setSelectedId(null);
         try {
             const resp = await fetch(apiUrl(`/trace/${encodeURIComponent(id)}`));
@@ -1481,9 +1528,11 @@ function TraceUI() {
         <Layout className="app-shell">
             <Header className="top-bar">
                 <Space size={16} align="center" className="top-bar-left">
-                    <Title level={4} className="brand">
-                        tinytasktree Trace UI
-                    </Title>
+                    <button type="button" className="brand-button" onClick={() => void loadTraceList()}>
+                        <Title level={4} className="brand">
+                            tinytasktree Trace UI
+                        </Title>
+                    </button>
                 </Space>
                 <div className="search-box">
                     <Input
@@ -1801,13 +1850,57 @@ function TraceUI() {
                             </div>
                         )
                     ) : (
-                        <div className="empty-state">Load a trace to see the execution flow.</div>
+                        <div className="empty-state trace-home">
+                            <Card className="trace-list-card" bordered>
+                                <Space direction="vertical" size={16} style={{ width: "100%" }}>
+                                    <div className="trace-list-header">
+                                        <div>
+                                            <Title level={4} className="details-title">
+                                                Saved Traces
+                                            </Title>
+                                            <Text className="toggle-label">
+                                                {traceListLoading
+                                                    ? "Loading..."
+                                                    : traceList.length
+                                                      ? `${traceList.length} trace${traceList.length > 1 ? "s" : ""}`
+                                                      : "No traces found in the current trace directory."}
+                                            </Text>
+                                        </div>
+                                        <Button size="small" onClick={() => void loadTraceList()} loading={traceListLoading}>
+                                            Refresh
+                                        </Button>
+                                    </div>
+                                    {traceList.length ? (
+                                        <div className="trace-list">
+                                            {traceList.map((item) => (
+                                                <button
+                                                    key={item.id}
+                                                    type="button"
+                                                    className="trace-list-item"
+                                                    onClick={() => void loadTrace(item.id)}
+                                                >
+                                                    <div className="trace-list-main">
+                                                        <div className="trace-list-name">{item.name || "(unnamed trace)"}</div>
+                                                        <div className="trace-list-id">{item.id}</div>
+                                                    </div>
+                                                    <div className="trace-list-time">{formatTraceListDate(item.created_at)}</div>
+                                                </button>
+                                            ))}
+                                        </div>
+                                    ) : !traceListLoading ? (
+                                        <div className="trace-list-empty">Run a tree and save its trace into the current trace directory.</div>
+                                    ) : null}
+                                </Space>
+                            </Card>
+                        </div>
                     )}
                 </div>
                 <div className="resizer" onMouseDown={resizer.onMouseDown} />
                 <div className="right-panel">
                     {!selectedTrace ? (
-                        <div className="empty-state">Select a node to inspect details.</div>
+                        <div className="empty-state">
+                            {trace ? "Select a node to inspect details." : "Choose a trace from the list to inspect details."}
+                        </div>
                     ) : (
                         <div className="details">
                             <Card className="details-header" bordered>

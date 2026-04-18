@@ -112,3 +112,52 @@ def test_httpserver_trace_route_still_wins_over_ui_fallback(monkeypatch, tmp_pat
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_httpserver_lists_traces_desc(monkeypatch, tmp_path: Path):
+    ui_root = tmp_path / "ui_dist"
+    ui_root.mkdir(parents=True)
+    (ui_root / "index.html").write_text("<html><body>tinytasktree ui</body></html>", encoding="utf-8")
+
+    traces_dir = tmp_path / "traces"
+    monkeypatch.setattr(tinytasktree, "_find_bundled_ui_root", lambda: ui_root)
+
+    # fmt: off
+    tree_a = (
+        tinytasktree.Tree[Blackboard]("Alpha Trace")
+        .Sequence()
+        ._().Function(lambda: {"ok": "a"})
+        .End()
+    )
+    tree_b = (
+        tinytasktree.Tree[Blackboard]("Beta Trace")
+        .Sequence()
+        ._().Function(lambda: {"ok": "b"})
+        .End()
+    )
+    # fmt: on
+
+    async def _run_and_save(tree: tinytasktree.Tree[Blackboard]) -> str:
+        context = tinytasktree.Context()
+        async with context.using_blackboard(Blackboard()):
+            result = await tree(context)
+        assert result.is_ok()
+        storage = tinytasktree.FileTraceStorageHandler(str(traces_dir))
+        return await storage.save(context.trace_root())
+
+    trace_id_a = asyncio.run(_run_and_save(tree_a))
+    trace_id_b = asyncio.run(_run_and_save(tree_b))
+
+    handler = tinytasktree.create_http_app(str(traces_dir))
+    server, thread = _serve(handler)
+    try:
+        status, content_type, body = _request(server, "GET", "/traces")
+        assert status == 200
+        assert content_type.startswith("application/json")
+        payload = json.loads(body.decode())
+        assert [item["id"] for item in payload[:2]] == [trace_id_b, trace_id_a]
+        assert payload[0]["name"] == "Beta Trace"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
