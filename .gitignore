@@ -4,6 +4,7 @@
 .ruff_cache
 .traces
 ui/.vite
+ui/dist/
 node_modules
 test.py
 __pycache__
