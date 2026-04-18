@@ -3,7 +3,7 @@ tinytasktree
 ============
 
 A tiny async task-tree orchestrator library for Python, behavior-tree inspired and LLM-ready.
-Requires Python 3.13 or 3.14 (3.15 is not yet supported due to upstream PyO3/fastuuid compatibility).
+Requires Python 3.13+.
 
 Example::
 
@@ -21,10 +21,16 @@ Example::
     def on_delta(b: Blackboard, fulltext: str, delta: str, finished: bool) -> None:
         print(delta, end="")
 
+    LLM_BASE_URL = os.getenv("LLM_BASE_URL")
+    LLM_API_KEY = os.getenv("LLM_API_KEY")
+
+    provider = LLMProvider(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
+    model = LLMModel("google/gemma-3-27b-it:free", provider=provider)
+
     tree = (
         Tree[Blackboard]("HelloWorld")
         .Sequence()
-        ._().LLM("openrouter/google/gemma-3-27b-it:free", make_messages, stream=True, stream_on_delta=on_delta)
+        ._().LLM(model, make_messages, stream=True, stream_on_delta=on_delta)
         ._().WriteBlackboard(write_response)
         .End()
     )
@@ -60,7 +66,7 @@ Decorator Nodes:
     * .Retry()
     * .While()
     * .Timeout() / .Fallback()
-    * .RedisCacher()
+    * .Cacher()
     * .Terminable()
     * .Wrapper()
 Composite Nodes:
@@ -73,8 +79,8 @@ Composite Nodes:
 
 ### Trace Supports
 
-* Trace UI Viewer (Also As A Tree)
 * Optional trace storage via `TraceStorageHandler` (e.g., `FileTraceStorageHandler` saves JSON to disk)
+* Trace UI Viewer: `python -m tinytasktree --httpserver --host 127.0.0.1 --port 8000 --trace-dir .traces`
 
 Example::
 
@@ -83,17 +89,6 @@ Example::
     trace_json = await storage.query(trace_id)
 
 Note: It is safe to reuse a global `FileTraceStorageHandler` instance across runs.
-
-### UI Server
-
-Trace UI (React/Vite) runs separately and proxies to the HTTP server:
-
-    # 1) start backend
-    python -m tinytasktree --httpserver --host 127.0.0.1 --port 8000 --trace-dir .traces
-    # 2) start UI dev server
-    cd ui && npm run dev
-    # 3) open the UI
-    http://127.0.0.1:5173
 
 ### Others
 
@@ -117,13 +112,6 @@ build and run within the same thread.
 ### Environments
 
 * DISABLE_TASKTREE_LOGGING=1 disables internal tasktree logging.
-* DISABLE_LITE_LLM_LOGGING=1 disables LiteLLM logging (sets suppress_debug_info and set_verbose).
-
-### FAQ
-
-Q: I see "coroutine 'close_litellm_async_clients' was never awaited" warnings. Is it a bug?
-A: This comes from LiteLLM async client cleanup on process exit. If it bothers you,
-   call `await litellm.close_litellm_async_clients()` before exiting your program.
 
 ### License
 
@@ -133,11 +121,16 @@ Author: chao.wang [at] orionarm.ai
 
 import asyncio
 import functools
+import http.server
+import importlib.resources
 import inspect
+import json
 import logging
+import mimetypes
 import os
 import pickle
 import random
+import re
 import reprlib
 import threading
 import uuid
@@ -146,6 +139,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, is_dataclass
 from datetime import date, datetime, timedelta
 from enum import Enum, IntEnum
+from http import HTTPStatus
+from pathlib import Path, PurePosixPath
 from typing import (
     Any,
     AsyncContextManager,
@@ -161,22 +156,27 @@ from typing import (
     final,
     override,
 )
+from urllib.parse import unquote, urlparse
 
-import json_repair
-import litellm
-import orjson
-import redis.asyncio as async_redis
+from openai import AsyncOpenAI
 
-_DISABLE_LITE_LLM_LOGGING = os.getenv("DISABLE_LITE_LLM_LOGGING", "").strip().lower() not in {"", "0", "false"}
-if _DISABLE_LITE_LLM_LOGGING:
-    litellm.suppress_debug_info = True
-    litellm.set_verbose = False
+try:
+    import json_repair
+except ImportError:
+    json_repair = None
+
+try:
+    import orjson
+except ImportError:
+    orjson = None
 
 __all__ = (
     "AnyB",
     "B",
     "Context",
     "JSON",
+    "LLMModel",
+    "LLMProvider",
     "JSONLoader",
     "Result",
     "Status",
@@ -196,11 +196,83 @@ __all__ = (
 )
 
 
+def _json_loads(data: str | bytes | bytearray) -> Any:
+    if orjson is not None:
+        return orjson.loads(data)
+    if isinstance(data, bytearray):
+        data = bytes(data)
+    return json.loads(data)
+
+
+def _json_dumps(
+    data: Any,
+    *,
+    default: Callable[[Any], Any] | None = None,
+    indent: int | None = None,
+) -> bytes:
+    if orjson is not None:
+        option = orjson.OPT_INDENT_2 if indent == 2 else 0
+        if default is None:
+            return orjson.dumps(data, option=option)
+        return orjson.dumps(data, default=default, option=option)
+    return json.dumps(
+        data,
+        default=default,
+        indent=indent,
+        ensure_ascii=False,
+        separators=(",", ":") if indent is None else None,
+    ).encode("utf-8")
+
+
+def _find_bundled_ui_root() -> Any | None:
+    try:
+        ui_root = importlib.resources.files("tinytasktree").joinpath("ui_dist")
+        if ui_root.joinpath("index.html").is_file():
+            return ui_root
+    except Exception:
+        pass
+
+    local_ui_root = Path(__file__).resolve().parents[1].joinpath("ui", "dist")
+    if local_ui_root.joinpath("index.html").is_file():
+        return local_ui_root
+    return None
+
+
+def _resolve_ui_file(ui_root: Any, request_path: str) -> tuple[Any, str] | None:
+    normalized = request_path.lstrip("/") or "index.html"
+    parts = [part for part in PurePosixPath(normalized).parts if part not in {"", "."}]
+    if any(part == ".." for part in parts):
+        return None
+
+    candidate = ui_root.joinpath(*parts) if parts else ui_root.joinpath("index.html")
+    if candidate.is_file():
+        content_type = mimetypes.guess_type(str(PurePosixPath(*parts)) if parts else "index.html")[0]
+        return candidate, content_type or "application/octet-stream"
+
+    if parts and any("." in part for part in parts):
+        return None
+
+    index_file = ui_root.joinpath("index.html")
+    if index_file.is_file():
+        return index_file, "text/html; charset=utf-8"
+    return None
+
+
 ##############
 # Common Types
 ##############
 
 type JSON = dict[str, Any]
+
+
+class CacheStore(Protocol):
+    async def get(self, key: str) -> Any: ...
+
+    async def set(self, key: str, value: Any, ex: int | float | timedelta | None = None) -> Any: ...
+
+    async def delete(self, key: str) -> Any: ...
+
+    async def exists(self, key: str) -> Any: ...
 
 
 class TasktreeError(Exception): ...
@@ -361,7 +433,7 @@ class TraceNode:
             _merge_token_fields(tokens, prompt, completion, total)
         elif isinstance(tokens_value, str) and tokens_value:
             try:
-                parsed = orjson.loads(tokens_value)
+                parsed = _json_loads(tokens_value)
                 if isinstance(parsed, dict):
                     prompt = _as_int(parsed.get("prompt"))
                     completion = _as_int(parsed.get("completion"))
@@ -417,6 +489,9 @@ class TraceStorageHandler(Protocol):
     async def query(self, trace_id: str) -> JSON:
         """Load a trace by id and return its JSON content."""
 
+    async def list_traces(self) -> list[JSON]:
+        """List persisted traces in descending time order."""
+
 
 class FileTraceStorageHandler:
     def __init__(self, dirpath: str = ".traces") -> None:
@@ -425,17 +500,45 @@ class FileTraceStorageHandler:
     def _path_for(self, trace_id: str) -> str:
         return os.path.join(self._dirpath, f"{trace_id}.json")
 
+    def _derive_trace_name(self, trace_root: TraceRoot) -> str:
+        def normalize(name: str) -> str:
+            stripped = name.strip()
+            matched = re.fullmatch(r"Tree\((.*)\)", stripped)
+            if matched:
+                inner = matched.group(1).strip()
+                return inner or "trace"
+            return stripped or "trace"
+
+        if trace_root.children:
+            first_child = next(iter(trace_root.children.values()))
+            if first_child.name:
+                return normalize(first_child.name)
+        return normalize(trace_root.name or "trace")
+
+    def _slugify_trace_name(self, name: str, max_len: int = 24) -> str:
+        normalized = re.sub(r"\s+", "-", name.strip().lower())
+        normalized = re.sub(r"[^a-z0-9_-]+", "-", normalized)
+        normalized = normalized.strip("-_")
+        if not normalized:
+            normalized = "trace"
+        return normalized[:max_len].rstrip("-_") or "trace"
+
     async def save(self, trace_root: TraceRoot) -> str:
-        trace_id = uuid.uuid4().hex
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        slug = self._slugify_trace_name(self._derive_trace_name(trace_root))
+        trace_id = f"{ts}-{slug}-{uuid.uuid4().hex[:8]}"
         path = self._path_for(trace_id)
-        data = orjson.dumps(trace_root.json(), option=orjson.OPT_INDENT_2)
+        data = _json_dumps(trace_root.json(), indent=2)
         await asyncio.to_thread(self._write_file, path, data)
         return trace_id
 
     async def query(self, trace_id: str) -> JSON:
         path = self._path_for(trace_id)
         data = await asyncio.to_thread(self._read_file, path)
-        return cast(JSON, orjson.loads(data))
+        return cast(JSON, _json_loads(data))
+
+    async def list_traces(self) -> list[JSON]:
+        return await asyncio.to_thread(self._list_files)
 
     def _write_file(self, path: str, data: bytes) -> None:
         os.makedirs(self._dirpath, exist_ok=True)
@@ -445,6 +548,76 @@ class FileTraceStorageHandler:
     def _read_file(self, path: str) -> bytes:
         with open(path, "rb") as f:
             return f.read()
+
+    def _parse_trace_id_datetime(self, trace_id: str) -> datetime | None:
+        prefix = trace_id[:22]
+        try:
+            return datetime.strptime(prefix, "%Y%m%d-%H%M%S-%f")
+        except ValueError:
+            return None
+
+    def _list_files(self) -> "list[JSON]":
+        if not os.path.isdir(self._dirpath):
+            return []
+
+        entries: list[tuple[datetime, JSON]] = []
+        for name in os.listdir(self._dirpath):
+            if not name.endswith(".json"):
+                continue
+            trace_id = name[:-5]
+            path = os.path.join(self._dirpath, name)
+            try:
+                stat = os.stat(path)
+            except FileNotFoundError:
+                continue
+
+            created_at_dt = self._parse_trace_id_datetime(trace_id)
+            if created_at_dt is None:
+                created_at_dt = datetime.fromtimestamp(stat.st_mtime)
+            created_at = created_at_dt.isoformat()
+
+            trace_name = ""
+            try:
+                with open(path, "rb") as f:
+                    payload = cast(JSON, _json_loads(f.read()))
+                if isinstance(payload, dict):
+                    children = payload.get("children")
+                    if isinstance(children, dict) and children:
+                        first_child = next(iter(children.values()))
+                        if isinstance(first_child, dict):
+                            first_name = first_child.get("name")
+                            if isinstance(first_name, str):
+                                stripped = first_name.strip()
+                                matched = re.fullmatch(r"Tree\((.*)\)", stripped)
+                                if matched:
+                                    trace_name = matched.group(1).strip() or "trace"
+                                else:
+                                    trace_name = stripped or "trace"
+                    if not trace_name:
+                        root_name = payload.get("name")
+                        if isinstance(root_name, str):
+                            stripped = root_name.strip()
+                            matched = re.fullmatch(r"Tree\((.*)\)", stripped)
+                            if matched:
+                                trace_name = matched.group(1).strip() or "trace"
+                            else:
+                                trace_name = stripped or "trace"
+            except Exception:
+                trace_name = ""
+
+            entries.append(
+                (
+                    created_at_dt,
+                    {
+                        "id": trace_id,
+                        "name": trace_name,
+                        "created_at": created_at,
+                    },
+                )
+            )
+
+        entries.sort(key=lambda item: item[0], reverse=True)
+        return [item[1] for item in entries]
 
 
 ##############
@@ -1040,13 +1213,13 @@ class SubtreeForwarderNode[B, B1](LeafNode[B]):
 
 type BlackboardAttrGetter[B] = Callable[[B], Any]
 
-type JSONLoader = Callable[[str], JSON]
+type JSONLoader = Callable[[str], JSON | None]
 
 _JSON_FENCE = "```"
 _JSON_FENCE_JSON = "```json"
 
 
-def json_loader_trying_repair(s: str) -> JSON:
+def _strip_json_fences(s: str) -> str:
     s = s.strip()
     if s.startswith(_JSON_FENCE_JSON):
         s = s[len(_JSON_FENCE_JSON) :]
@@ -1054,10 +1227,17 @@ def json_loader_trying_repair(s: str) -> JSON:
         s = s[len(_JSON_FENCE) :]
     if s.endswith(_JSON_FENCE):
         s = s[: -len(_JSON_FENCE)]
+    return s.strip()
+
+
+def json_loader_default(s: str) -> JSON | None:
+    s = _strip_json_fences(s)
     try:
-        return orjson.loads(s)
+        if json_repair is not None:
+            return cast(JSON, json_repair.loads(s))
+        return cast(JSON, _json_loads(s))
     except Exception:
-        return cast(JSON, json_repair.loads(s))
+        return None
 
 
 class ParseJSON[B](LeafNode[B]):
@@ -1073,7 +1253,7 @@ class ParseJSON[B](LeafNode[B]):
         LeafNode.__init__(self, name)
         self._src = src
         self._dst = dst
-        self._json_loader = json_loader or json_loader_trying_repair
+        self._json_loader = json_loader or json_loader_default
 
     def _get_src_data(self, context: Context) -> str:
         if self._src is None:  # source from last_result
@@ -1104,7 +1284,7 @@ class ParseJSON[B](LeafNode[B]):
 
     @override
     async def _impl(self, context: Context, tracer: Tracer) -> Result:
-        s = self._get_src_data(context)
+        s = _strip_json_fences(self._get_src_data(context))
         tracer.log(f"using json_loader: {_normalized_func_name(self._json_loader)}")
         d = self._json_loader(s)
         if d is None:
@@ -1113,9 +1293,31 @@ class ParseJSON[B](LeafNode[B]):
         return Result.OK(d)
 
 
-type LLMModelFactory[B] = Callable[[B], str]  # function(blackboard) => model
+@dataclass(frozen=True)
+class LLMProvider:
+    base_url: str
+    api_key: str | None = None
+    client_kwargs: dict[str, Any] = field(default_factory=dict)
+    extra_body: dict[str, Any] = field(default_factory=dict)
+    llm_call_kwargs: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class LLMModel:
+    model: str
+    provider: LLMProvider
+    input_price_per_m: float = 0.0
+    output_price_per_m: float = 0.0
+    client_kwargs: dict[str, Any] = field(default_factory=dict)
+    extra_body: dict[str, Any] = field(default_factory=dict)
+    llm_call_kwargs: dict[str, Any] = field(default_factory=dict)
+
+
+type LLMResolvedModel = str | LLMModel
+type LLMModelFactory[B] = Callable[[B], LLMResolvedModel]  # function(blackboard) => model
 type LLMMessagesFactory[B] = Callable[[B], list[JSON]]  # function(blackboard) => messages
 type LLMStreamFactory[B] = Callable[[B], bool]  # function(blackboard) => stream (bool)
+type LLMBaseURLFactory[B] = Callable[[B], str | None]  # function(blackboard) => base_url | None
 
 type LLMApiKeyFactory1[B] = Callable[[B], str | None]  # function(blackboard) => api_key | None
 type LLMApiKeyFactory2[B] = Callable[[B, str], str | None]  # function(blackboard, model_name) => api_key | None
@@ -1156,18 +1358,42 @@ type LLMStreamOnChunkCallback[B] = (
 )
 
 
+def _new_async_openai_client(**kwargs: Any) -> AsyncOpenAI:
+    return AsyncOpenAI(**kwargs)
+
+
+async def _close_openai_client(client: Any) -> None:
+    close = getattr(client, "close", None)
+    if not callable(close):
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result
+
+
 @final
 class LLMNode[B](LeafNode[B]):
     KIND: str = "LLM"
 
     @staticmethod
-    def _extract_tokens(usage: Any | None) -> dict[str, int] | None:
-        if not isinstance(usage, dict):
-            return None
+    def _obj_get(obj: Any, key: str, default: Any = None) -> Any:
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
 
-        prompt = _as_int(usage.get("prompt_tokens"))
-        completion = _as_int(usage.get("completion_tokens"))
-        total = _as_int(usage.get("total_tokens"))
+    @classmethod
+    def _extract_tokens(cls, usage: Any | None) -> dict[str, int] | None:
+        prompt = _as_int(cls._obj_get(usage, "prompt_tokens"))
+        if prompt is None:
+            prompt = _as_int(cls._obj_get(usage, "input_tokens"))
+
+        completion = _as_int(cls._obj_get(usage, "completion_tokens"))
+        if completion is None:
+            completion = _as_int(cls._obj_get(usage, "output_tokens"))
+
+        total = _as_int(cls._obj_get(usage, "total_tokens"))
         if total is None and prompt is not None and completion is not None:
             total = prompt + completion
 
@@ -1182,27 +1408,127 @@ class LLMNode[B](LeafNode[B]):
 
     @staticmethod
     def _compute_tokens(model_name: str, messages_obj: Any, output_text: str) -> dict[str, int] | None:
-        try:
-            prompt_tokens = litellm.token_counter(model=model_name, messages=messages_obj)
-        except Exception:
-            prompt_tokens = None
-        try:
-            completion_tokens = litellm.token_counter(model=model_name, text=output_text, count_response_tokens=True)
-        except Exception:
-            completion_tokens = None
+        del model_name, messages_obj, output_text
+        return None
+
+    @classmethod
+    def _content_to_text(cls, content: Any) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            chunks: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    chunks.append(item)
+                    continue
+                text = cls._obj_get(item, "text")
+                if text is None:
+                    text = cls._obj_get(item, "content")
+                if isinstance(text, str):
+                    chunks.append(text)
+            return "".join(chunks)
+        return str(content)
+
+    @classmethod
+    def _extract_response_cost(cls, response: Any | None = None, usage: Any | None = None) -> float | None:
+        hidden = cls._obj_get(response, "_hidden_params")
+        if isinstance(hidden, dict):
+            value = _as_float(hidden.get("response_cost"))
+            if value is not None:
+                return value
+
+        value = _as_float(cls._obj_get(response, "response_cost"))
+        if value is not None:
+            return value
+
+        value = _as_float(cls._obj_get(usage, "response_cost"))
+        if value is not None:
+            return value
+
+        return _as_float(cls._obj_get(usage, "estimated_cost"))
+
+    @classmethod
+    def _normalize_openai_request(
+        cls,
+        *,
+        model: str,
+        client_kwargs: dict[str, Any],
+        api_key: str | None,
+        base_url: str | None,
+        stream: bool,
+        extra_body: dict[str, Any],
+        llm_call_kwargs: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], str]:
+        request_kwargs: dict[str, Any] = {}
+        request_kwargs.update(llm_call_kwargs)
+
+        if extra_body:
+            existing_extra_body = request_kwargs.get("extra_body")
+            if isinstance(existing_extra_body, dict):
+                merged_extra_body = dict(existing_extra_body)
+                merged_extra_body.update(extra_body)
+                request_kwargs["extra_body"] = merged_extra_body
+            else:
+                request_kwargs["extra_body"] = extra_body
+
+        if base_url is not None:
+            client_kwargs["base_url"] = base_url
+
+        if api_key is not None:
+            client_kwargs["api_key"] = api_key
+
+        if stream and "stream_options" not in request_kwargs and "base_url" not in client_kwargs:
+            request_kwargs["stream_options"] = {"include_usage": True}
+
+        return client_kwargs, request_kwargs, model
+
+    @classmethod
+    def _first_choice(cls, payload: Any) -> Any | None:
+        choices = cls._obj_get(payload, "choices") or []
+        if not choices:
+            return None
+        return choices[0]
+
+    @staticmethod
+    def _merge_llm_call_kwargs(*sources: dict[str, Any] | None) -> dict[str, Any]:
+        merged: dict[str, Any] = {}
+        for source in sources:
+            if source:
+                merged.update(source)
+        return merged
+
+    @staticmethod
+    def _resolve_model_input(
+        model_input: LLMResolvedModel,
+    ) -> tuple[str, LLMProvider | None, float, float, dict[str, Any], dict[str, Any], dict[str, Any]]:
+        if isinstance(model_input, LLMModel):
+            return (
+                model_input.model,
+                model_input.provider,
+                float(model_input.input_price_per_m),
+                float(model_input.output_price_per_m),
+                dict(model_input.client_kwargs),
+                dict(model_input.extra_body),
+                dict(model_input.llm_call_kwargs),
+            )
+        return model_input, None, 0.0, 0.0, {}, {}, {}
+
+    @staticmethod
+    def _compute_priced_cost(tokens: dict[str, int] | None, input_price_per_m: float, output_price_per_m: float) -> float | None:
+        if not tokens:
+            return None
+        prompt_tokens = tokens.get("prompt")
+        completion_tokens = tokens.get("completion")
         if prompt_tokens is None and completion_tokens is None:
             return None
-        total_tokens = None
-        if prompt_tokens is not None and completion_tokens is not None:
-            total_tokens = prompt_tokens + completion_tokens
-        tokens: dict[str, int] = {}
+        cost = 0.0
         if prompt_tokens is not None:
-            tokens["prompt"] = int(prompt_tokens)
+            cost += (prompt_tokens / 1_000_000.0) * input_price_per_m
         if completion_tokens is not None:
-            tokens["completion"] = int(completion_tokens)
-        if total_tokens is not None:
-            tokens["total"] = int(total_tokens)
-        return tokens or None
+            cost += (completion_tokens / 1_000_000.0) * output_price_per_m
+        return cost
 
     def _resolve_api_key(self, b: B, model: str) -> str | None:
         api_key_source = self._api_key if self._api_key is not None else _DEFAULT_GLOBAL_LLM_API_KEY_FACTORY
@@ -1215,16 +1541,29 @@ class LLMNode[B](LeafNode[B]):
             if params_cnt == 2:
                 return cast(LLMApiKeyFactory2[B], api_key_source)(b, model)
             raise TasktreeProgrammingError(f"{self.fullname}: api_key factory params count invalid")
-        return api_key_source
+        if api_key_source is not None:
+            return api_key_source
+        return None
+
+    def _resolve_base_url(self, b: B) -> str | None:
+        base_url_source = self._base_url
+        if callable(base_url_source):
+            if self._base_url_params_cnt == 1:
+                return cast(LLMBaseURLFactory[B], base_url_source)(b)
+            raise TasktreeProgrammingError(f"{self.fullname}: base_url factory params count invalid")
+        return base_url_source
 
     def __init__(
         self,
-        model: str | LLMModelFactory[B],
+        model: LLMResolvedModel | LLMModelFactory[B],
         messages: list[JSON] | LLMMessagesFactory[B],
         stream: bool | LLMStreamFactory[B] = False,
         stream_on_delta: LLMStreamOnChunkCallback[B] | None = None,
         api_key: str | LLMApiKeyFactory[B] | None = None,
         name: str = "",
+        base_url: str | LLMBaseURLFactory[B] | None = None,
+        client_kwargs: dict[str, Any] | None = None,
+        extra_body: dict[str, Any] | None = None,
         **llm_call_kwargs,
     ) -> None:
         LeafNode.__init__(self, name)
@@ -1233,21 +1572,29 @@ class LLMNode[B](LeafNode[B]):
         self._stream = stream
         self._stream_on_delta = stream_on_delta
         self._api_key = api_key
+        self._base_url = base_url
+        self._client_kwargs = dict(client_kwargs) if client_kwargs else {}
+        self._extra_body = dict(extra_body) if extra_body else {}
         self._is_stream_on_delta_async = False
         self._stream_on_delta_params_cnt = 4
         self._api_key_params_cnt = 0
+        self._base_url_params_cnt = 0
         if stream_on_delta:
             self._is_stream_on_delta_async = inspect.iscoroutinefunction(stream_on_delta)
             self._stream_on_delta_params_cnt = _inspect_func_parameters_count(stream_on_delta)
         if callable(api_key):
             self._api_key_params_cnt = _inspect_func_parameters_count(api_key)
+        if callable(base_url):
+            self._base_url_params_cnt = _inspect_func_parameters_count(base_url)
         self._llm_call_kwargs = llm_call_kwargs
 
     def _try_record_cost(
         self,
         *,
         tracer: Tracer,
-        model: str,
+        tokens: dict[str, int] | None = None,
+        input_price_per_m: float = 0.0,
+        output_price_per_m: float = 0.0,
         response: Any | None = None,
         usage: dict[str, Any] | None = None,
         cost_reported: bool = False,
@@ -1255,30 +1602,14 @@ class LLMNode[B](LeafNode[B]):
         if cost_reported:
             return True
         try:
-            if response is not None:
-                hidden = getattr(response, "_hidden_params", None)
-                response_cost = None
-                if hidden and "response_cost" in hidden:
-                    response_cost = hidden["response_cost"]
-                elif isinstance(response, dict):
-                    response_cost = response.get("_hidden_params", {}).get("response_cost")
-                if response_cost is None:
-                    try:
-                        response_cost = litellm.completion_cost(completion_response=response)
-                    except Exception:
-                        response_cost = None
-                if response_cost is not None:
-                    tracer.incr_cost(float(response_cost))
-                    return True
-            if usage:
-                prompt_tokens = usage.get("prompt_tokens")
-                completion_tokens = usage.get("completion_tokens")
-                if prompt_tokens is not None and completion_tokens is not None:
-                    prompt_cost, completion_cost = litellm.cost_per_token(
-                        model=model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
-                    )
-                    tracer.incr_cost(float(prompt_cost) + float(completion_cost))
-                    return True
+            response_cost = self._extract_response_cost(response=response, usage=usage)
+            if response_cost is not None:
+                tracer.incr_cost(response_cost)
+                return True
+            priced_cost = self._compute_priced_cost(tokens, input_price_per_m, output_price_per_m)
+            if priced_cost is not None and priced_cost > 0:
+                tracer.incr_cost(priced_cost)
+                return True
         except Exception:
             return False
         return False
@@ -1293,6 +1624,10 @@ class LLMNode[B](LeafNode[B]):
         if callable(self._api_key):
             assert self._api_key_params_cnt in {1, 2}, TasktreeProgrammingError(
                 f"{self.fullname}: api_key factory params count invalid"
+            )
+        if callable(self._base_url):
+            assert self._base_url_params_cnt == 1, TasktreeProgrammingError(
+                f"{self.fullname}: base_url factory params count invalid"
             )
         if self._api_key is None and callable(_DEFAULT_GLOBAL_LLM_API_KEY_FACTORY):
             assert _DEFAULT_GLOBAL_LLM_API_KEY_PARAMS_CNT in {1, 2}, TasktreeProgrammingError(
@@ -1321,59 +1656,131 @@ class LLMNode[B](LeafNode[B]):
     @override
     async def _impl(self, context: Context, tracer: Tracer) -> Result:
         b = cast(B, context._current_blackboard())
-        model = self._model(b) if callable(self._model) else self._model
+        model_input = self._model(b) if callable(self._model) else self._model
+        model, provider, input_price_per_m, output_price_per_m, model_client_kwargs, model_extra_body, model_llm_call_kwargs = (
+            self._resolve_model_input(model_input)
+        )
         messages = self._messages(b) if callable(self._messages) else self._messages
         stream = self._stream(b) if callable(self._stream) else self._stream
+        merged_client_kwargs = self._merge_llm_call_kwargs(
+            provider.client_kwargs if provider is not None else None,
+            model_client_kwargs,
+            self._client_kwargs,
+        )
+        merged_extra_body = self._merge_llm_call_kwargs(
+            provider.extra_body if provider is not None else None,
+            model_extra_body,
+            self._extra_body,
+        )
+        merged_llm_call_kwargs = self._merge_llm_call_kwargs(
+            provider.llm_call_kwargs if provider is not None else None,
+            model_llm_call_kwargs,
+            self._llm_call_kwargs,
+        )
         api_key = self._resolve_api_key(b, model)
+        if api_key is None and provider is not None:
+            api_key = provider.api_key
+        base_url = self._resolve_base_url(b)
+        if base_url is None and provider is not None:
+            base_url = provider.base_url
         output = ""
         last_tokens: dict[str, int] | None = None
 
         tracer.update_attributes(model=model)
         tracer.update_attributes(messages=messages)
         tracer.update_attributes(stream=stream)
-        tracer.update_attributes(**self._llm_call_kwargs)
+        tracer.update_attributes(input_price_per_m=input_price_per_m)
+        tracer.update_attributes(output_price_per_m=output_price_per_m)
+        tracer.update_attributes(**merged_llm_call_kwargs)
+        if merged_extra_body:
+            tracer.update_attributes(extra_body=merged_extra_body)
+            if "reasoning" in merged_extra_body:
+                tracer.update_attributes(reasoning=merged_extra_body["reasoning"])
         if api_key is not None:
             tracer.update_attributes(api_key="***")
+        if base_url is not None:
+            tracer.update_attributes(base_url=base_url)
 
         finish_reason: str = ""
-        kwargs: dict[str, Any] = {"model": model, "messages": messages, "stream": stream}
-        if api_key is not None:
-            kwargs["api_key"] = api_key
-        kwargs.update(self._llm_call_kwargs or {})
-        response = await litellm.acompletion(**kwargs)
-
+        client_kwargs, request_kwargs, request_model = self._normalize_openai_request(
+            model=model,
+            client_kwargs=merged_client_kwargs,
+            api_key=api_key,
+            base_url=base_url,
+            stream=stream,
+            extra_body=merged_extra_body,
+            llm_call_kwargs=merged_llm_call_kwargs,
+        )
+        if api_key is None and "api_key" in client_kwargs:
+            tracer.update_attributes(api_key="***")
+        request_kwargs.update({"model": request_model, "messages": messages, "stream": stream})
+        client = _new_async_openai_client(**client_kwargs)
         cost_reported = False
+        try:
+            response = await client.chat.completions.create(**request_kwargs)
 
-        if stream:
-            async for chunk in response:
-                choices = chunk.get("choices") or []
-                cost_reported = self._try_record_cost(
-                    tracer=tracer, model=model, usage=chunk.get("usage"), cost_reported=cost_reported
-                )
-                tokens = self._extract_tokens(chunk.get("usage"))
-                if tokens is not None:
-                    last_tokens = tokens
-                if choices:
-                    delta = choices[0]["delta"]
-                    delta_content = delta.get("content") or ""
+            if stream:
+                async for chunk in response:
+                    usage = self._obj_get(chunk, "usage")
+                    tokens = self._extract_tokens(usage)
+                    cost_reported = self._try_record_cost(
+                        tracer=tracer,
+                        tokens=tokens,
+                        input_price_per_m=input_price_per_m,
+                        output_price_per_m=output_price_per_m,
+                        usage=usage,
+                        cost_reported=cost_reported,
+                    )
+                    if tokens is not None:
+                        last_tokens = tokens
+
+                    choice = self._first_choice(chunk)
+                    if choice is None:
+                        continue
+
+                    delta = self._obj_get(choice, "delta")
+                    delta_content = self._content_to_text(self._obj_get(delta, "content"))
                     output += delta_content
-                    fr = choices[0].get("finish_reason")
+                    fr = self._obj_get(choice, "finish_reason")
                     if fr is not None:
-                        finish_reason = fr
+                        finish_reason = str(fr)
                     await self._call_stream_delta_callback(b, output, delta_content, False, finish_reason)
-            await self._call_stream_delta_callback(b, output, "", True, finish_reason)
-        else:
-            output = response["choices"][0]["message"]["content"]
-            finish_reason = response["choices"][0].get("finish_reason")
-            cost_reported = self._try_record_cost(
-                tracer=tracer, model=model, response=response, usage=response.get("usage"), cost_reported=cost_reported
-            )
-            last_tokens = self._extract_tokens(response.get("usage"))
+                await self._call_stream_delta_callback(b, output, "", True, finish_reason)
+            else:
+                choice = self._first_choice(response)
+                if choice is not None:
+                    message = self._obj_get(choice, "message")
+                    output = self._content_to_text(self._obj_get(message, "content"))
+                    fr = self._obj_get(choice, "finish_reason")
+                    if fr is not None:
+                        finish_reason = str(fr)
+
+                usage = self._obj_get(response, "usage")
+                last_tokens = self._extract_tokens(usage)
+                cost_reported = self._try_record_cost(
+                    tracer=tracer,
+                    tokens=last_tokens,
+                    input_price_per_m=input_price_per_m,
+                    output_price_per_m=output_price_per_m,
+                    response=response,
+                    usage=usage,
+                    cost_reported=cost_reported,
+                )
+        finally:
+            await _close_openai_client(client)
 
         tracer.update_attributes(output=output)
         tracer.update_attributes(finish_reason=finish_reason)
         if last_tokens is None:
             last_tokens = self._compute_tokens(model, messages, output)
+        if not cost_reported:
+            cost_reported = self._try_record_cost(
+                tracer=tracer,
+                tokens=last_tokens,
+                input_price_per_m=input_price_per_m,
+                output_price_per_m=output_price_per_m,
+                cost_reported=False,
+            )
         if last_tokens is not None:
             tracer.update_attributes(tokens=last_tokens)
             if "prompt" in last_tokens:
@@ -1797,7 +2204,7 @@ class FallbackNode[B](_ForwardingChildNode[B]):
             raise TasktreeProgrammingError(f"{self.fullname}: Fallback's parent must be one of [Timeout, Terminable]")
 
 
-type TerminableRedisKeyFunction[B] = Callable[[B], str]
+type TerminableKeyFunction[B] = Callable[[B], str]
 
 
 @final
@@ -1806,8 +2213,8 @@ class TerminableDecoratorNode[B](CompositeNode[B], DecoratorNode[B]):
 
     def __init__(
         self,
-        key_func: TerminableRedisKeyFunction,
-        redis_client: async_redis.Redis | None = None,
+        key_func: TerminableKeyFunction[B],
+        store: CacheStore | None = None,
         monitor_interval_ms: float = 500,  # ms
         name: str = "",
     ):
@@ -1815,7 +2222,7 @@ class TerminableDecoratorNode[B](CompositeNode[B], DecoratorNode[B]):
         CompositeNode.__init__(self, None, name)
         self._key_func = key_func
         self._monitor_interval_ms = monitor_interval_ms
-        self._redis_client = redis_client or _DEFAULT_GLOBAL_REDIS_INSTANCE
+        self._store = store
 
     @override
     def OnBuildEnd(self) -> None:
@@ -1823,18 +2230,18 @@ class TerminableDecoratorNode[B](CompositeNode[B], DecoratorNode[B]):
         CompositeNode.OnBuildEnd(self)
         if len(self.children()) not in {1, 2}:
             raise TasktreeProgrammingError(f"{self.fullname}: must have 1 or 2 children")
-        if not self._redis_client:
-            raise TasktreeError(f"{self.fullname}: must provide a redis_client instance")
+        if not self._store:
+            raise TasktreeError(f"{self.fullname}: must provide a store instance")
 
     async def _monitor_termination_signal(self, context: Context) -> None:
-        assert self._redis_client
+        assert self._store
         b = cast(B, context._current_blackboard())
         k = self._key_func(b)
         # We first clear the key, ensures everything is clean.
-        await self._redis_client.delete(k)
+        await self._store.delete(k)
         while True:
-            if await self._redis_client.exists(k):
-                await self._redis_client.delete(k)
+            if await self._store.exists(k):
+                await self._store.delete(k)
                 return
             await asyncio.sleep(self._monitor_interval_ms / 1000.0)
 
@@ -1876,34 +2283,34 @@ class TerminableDecoratorNode[B](CompositeNode[B], DecoratorNode[B]):
         return Result.FAIL(None)
 
 
-type RedisCacherKeyFunction[B] = Callable[[B], str]  # function(blackboard) -> key
+type CacherKeyFunction[B] = Callable[[B], str]  # function(blackboard) -> key
 #  # function(blackboard [, tracer]) -> value_validator_string
-type RedisCacherValueValidator1[B] = Callable[[B], str]
-type RedisCacherValueValidator2[B] = Callable[[B, Tracer], str]
-type RedisCacherValueValidator[B] = RedisCacherValueValidator1[B] | RedisCacherValueValidator2[B]
+type CacherValueValidator1[B] = Callable[[B], str]
+type CacherValueValidator2[B] = Callable[[B, Tracer], str]
+type CacherValueValidator[B] = CacherValueValidator1[B] | CacherValueValidator2[B]
 # seconds (int | float), timedelta, random in [min_timedelta, max_timedelta]
 type Cache_Expiration = int | float | timedelta | tuple[timedelta, timedelta]
 # function(blackboard) -> bool
-type RedisCacherEnabledFunction[B] = Callable[[B], bool]
+type CacherEnabledFunction[B] = Callable[[B], bool]
 
 
 @final
-class RedisCacherNode[B](SingleChildNode[B], DecoratorNode[B]):
-    KIND = "RedisCacher"
+class CacherNode[B](SingleChildNode[B], DecoratorNode[B]):
+    KIND = "Cacher"
 
     def __init__(
         self,
-        key_func: RedisCacherKeyFunction[B],
-        redis_client: async_redis.Redis | None = None,
+        key_func: CacherKeyFunction[B],
+        store: CacheStore | None = None,
         expiration: Cache_Expiration = timedelta(hours=1),
-        value_validator: RedisCacherValueValidator[B] | None = None,
-        enabled: bool | RedisCacherEnabledFunction[B] = True,
+        value_validator: CacherValueValidator[B] | None = None,
+        enabled: bool | CacherEnabledFunction[B] = True,
         name: str = "",
     ) -> None:
         DecoratorNode.__init__(self, name)
         SingleChildNode.__init__(self, None, name)
         self._key_func = key_func
-        self._redis_client = redis_client or _DEFAULT_GLOBAL_REDIS_INSTANCE
+        self._store = store
         self._value_validator = value_validator
         self._value_validator_params_cnt = _inspect_func_parameters_count(value_validator) if value_validator else 0
         self._ex = expiration
@@ -1916,13 +2323,13 @@ class RedisCacherNode[B](SingleChildNode[B], DecoratorNode[B]):
         if self._value_validator:
             if self._value_validator_params_cnt not in {1, 2}:
                 raise TasktreeProgrammingError(f"{self.fullname}: value_validator params count invalid")
-        if not self._redis_client:
-            raise TasktreeError(f"{self.fullname}: must provide a redis_client instance")
+        if not self._store:
+            raise TasktreeError(f"{self.fullname}: must provide a store instance")
 
     def _compute_enabled(self, context: Context) -> bool:
         if callable(self._enabled):  # function(blackboard) -> bool
             b = cast(B, context._current_blackboard())
-            func = cast(RedisCacherEnabledFunction[B], self._enabled)
+            func = cast(CacherEnabledFunction[B], self._enabled)
             return func(b)
         return self._enabled  # bool
 
@@ -1940,51 +2347,65 @@ class RedisCacherNode[B](SingleChildNode[B], DecoratorNode[B]):
             )
             secs = random.randint(min_t_secs, max_t_secs)
             return timedelta(seconds=secs)
-        raise TasktreeProgrammingError("RedisCacher: invalid expiration param")
+        raise TasktreeProgrammingError("Cacher: invalid expiration param")
 
     def _compute_value_validator(self, context: Context, tracer: Tracer) -> str:
         b = cast(B, context._current_blackboard())
         if self._value_validator_params_cnt == 1:
-            return cast(RedisCacherValueValidator1[B], self._value_validator)(b)
+            return cast(CacherValueValidator1[B], self._value_validator)(b)
         elif self._value_validator_params_cnt == 2:
-            return cast(RedisCacherValueValidator2[B], self._value_validator)(b, tracer)
+            return cast(CacherValueValidator2[B], self._value_validator)(b, tracer)
         return ""  # won't happen
 
     @override
     async def _impl(self, context: Context, tracer: Tracer) -> Result:
-        assert self._redis_client
+        assert self._store
         enabled = self._compute_enabled(context)
         child = self.child()
         b = cast(B, context._current_blackboard())
         k = self._key_func(b)
         validation = str(self._compute_value_validator(context, tracer)) if self._value_validator else ""
+        tracer.update_attributes(cache_key=k, cache_enabled=enabled)
+        if self._value_validator:
+            tracer.update_attributes(cache_validation=validation)
 
         if enabled:
-            w = await self._redis_client.get(k)
+            w = await self._store.get(k)
             if w:
                 try:
                     x = pickle.loads(w)
                     if self._value_validator:  # Need validation
                         if x["validation"] == validation:
                             # Succeeds only if key exists and validation pass.
+                            tracer.update_attributes(cache_status="hit", cache_hit=True)
                             tracer.log(f"cache hit, key: {k}, validation: {validation}")
                             return Result.OK(x["value"])
                         else:
+                            tracer.update_attributes(
+                                cache_status="invalidated",
+                                cache_hit=False,
+                                cache_validation_stored=x["validation"],
+                            )
                             tracer.log(
                                 "cache key found, but validation value changed: "
                                 + x["validation"]
                                 + f"(expect: {validation})=> deleting key {k}"
                             )
-                            await self._redis_client.delete(k)
+                            await self._store.delete(k)
                     else:
                         # No validation, directly returns the cached value
+                        tracer.update_attributes(cache_status="hit", cache_hit=True)
+                        tracer.log(f"cache hit, key: {k}")
                         return Result.OK(x["value"])
                 except Exception as e:
                     # (KeyError, pickle.UnpicklingError)
+                    tracer.update_attributes(cache_status="decode_error", cache_hit=False)
                     tracer.error(f"{e} => miss")
             else:
+                tracer.update_attributes(cache_status="miss", cache_hit=False)
                 tracer.log(f"cache miss, key: {k}")
         else:
+            tracer.update_attributes(cache_status="disabled", cache_hit=False)
             tracer.log("cache disabled")
 
         async with context._forward(child.fullname):
@@ -1995,7 +2416,8 @@ class RedisCacherNode[B](SingleChildNode[B], DecoratorNode[B]):
             ex = self._compute_ex()
             x1 = {"value": result.data, "validation": validation}
             w = pickle.dumps(x1)
-            await self._redis_client.set(k, w, ex=ex)
+            await self._store.set(k, w, ex=ex)
+            tracer.update_attributes(cache_written=True, cache_expires_in_secs=int(ex.total_seconds()))
             tracer.log(f"cache set (on ok), ex: {int(ex.total_seconds())}s, validation: {validation}")
         return result
 
@@ -2380,9 +2802,12 @@ class Tree[B](_ForwardingChildNode[B]):
             - `None`: Does not write to the blackboard.
             - `str`: Writes to `blackboard.<dst>`.
             - `Callable`: A setter function `f(blackboard, parsed_data) -> None`.
-        :param json_loader: A function to parse json into `JSON`, form: `f(str) -> JSON`.
-            Defaults to `json_loader_trying_repair`, which strips common ```json fences and
-            tries `json_repair` on orjson load failure.
+        :param json_loader: A function to parse json into `JSON | None`, form: `f(str) -> JSON | None`.
+            Input text is preprocessed by `ParseJSON` to strip common ```json fences
+            before the loader is called.
+            Defaults to `json_loader_default`, which tries `json_repair` if installed,
+            otherwise `orjson`, otherwise the standard library `json`.
+            Return `None` to make `ParseJSON` fail gracefully.
         :param name: Optional node name.
 
         Example::
@@ -2397,23 +2822,27 @@ class Tree[B](_ForwardingChildNode[B]):
 
     def LLM(
         self,
-        model: str | LLMModelFactory[B],
+        model: LLMResolvedModel | LLMModelFactory[B],
         messages: list[JSON] | LLMMessagesFactory[B],
         stream: bool | LLMStreamFactory[B] = False,
         stream_on_delta: LLMStreamOnChunkCallback[B] | None = None,
         api_key: str | LLMApiKeyFactory[B] | None = None,
         name: str = "",
+        base_url: str | LLMBaseURLFactory[B] | None = None,
+        client_kwargs: dict[str, Any] | None = None,
+        extra_body: dict[str, Any] | None = None,
         **llm_call_kwargs,
     ) -> Self:
         """
         Invokes an LLM (Large Language Model).
 
-        Based on LiteLLM: https://docs.litellm.ai/docs
+        Uses `openai-python` chat completions under the hood.
 
         - Status: Returns `OK` upon successful completion.
         - Data: Returns the final output text: `OK(output_text)`.
 
-        :param model: Model name string or a factory function `f(blackboard) -> str`.
+        :param model: Model name string, `LLMModel`, or a factory function
+            `f(blackboard) -> str | LLMModel`.
         :param messages: A list of message objects or a factory function `f(blackboard) -> list[JSON]`.
         :param stream: Boolean or a factory function `f(blackboard) -> bool` to enable streaming.
         :param stream_on_delta: Optional callback for streaming. Supports sync or async with signatures:
@@ -2426,21 +2855,42 @@ class Tree[B](_ForwardingChildNode[B]):
             Resolution order:
             1) `api_key` passed to this node
             2) `set_default_llm_api_key_factory()`
-            3) Environment variables (LiteLLM)
+            3) `openai-python`'s default resolution such as `OPENAI_API_KEY`
             4) None
+        :param base_url: Optional base URL string or a factory function `f(blackboard) -> str | None`.
+            Use this for OpenAI-compatible providers while keeping `model`
+            independent from the transport endpoint.
+        :param client_kwargs: Optional keyword arguments forwarded to `AsyncOpenAI(...)`.
+        :param extra_body: Optional provider-specific request body fields merged into `extra_body`.
         :param name: Optional name for the node.
-        :param llm_call_kwargs: Any other keyword arguments supported by `litellm.acompletion`
-            such as `reasoning_effort`, `max_tokens`, `temperature`
+        :param llm_call_kwargs: Extra keyword arguments forwarded to
+            `AsyncOpenAI().chat.completions.create(...)`.
 
         Example::
 
+            provider = LLMProvider(base_url="https://llm.example/v1", api_key="...")
+            model = LLMModel("openai/gpt-4.1-mini", provider=provider)
+
             Tree()
             .Sequence()
-            ._().LLM("openrouter/openai/gpt-4.1-mini", [{"role": "user", "content": "Hello!"}], stream=True, stream_on_delta=lambda b, text, delta, finished: print(delta, end=""))
+            ._().LLM(model, [{"role": "user", "content": "Hello!"}], stream=True, stream_on_delta=lambda b, text, delta, finished: print(delta, end=""))
             ._().WriteBlackboard("ai_response")
             .End()
         """
-        return self._attach(LLMNode[B](model, messages, stream, stream_on_delta, api_key, name, **llm_call_kwargs))
+        return self._attach(
+            LLMNode[B](
+                model,
+                messages,
+                stream,
+                stream_on_delta,
+                api_key,
+                name,
+                base_url,
+                client_kwargs,
+                extra_body,
+                **llm_call_kwargs,
+            )
+        )
 
     def Subtree[B1](
         self,
@@ -2683,25 +3133,23 @@ class Tree[B](_ForwardingChildNode[B]):
         """
         return self._attach(WrapperNode(func, name))
 
-    def RedisCacher(
+    def Cacher(
         self,
-        key_func: RedisCacherKeyFunction[B],
-        redis_client: async_redis.Redis | None = None,
+        key_func: CacherKeyFunction[B],
+        store: CacheStore | None = None,
         expiration: Cache_Expiration = timedelta(hours=1),
-        value_validator: RedisCacherValueValidator[B] | None = None,
-        enabled: bool | RedisCacherEnabledFunction[B] = True,
+        value_validator: CacherValueValidator[B] | None = None,
+        enabled: bool | CacherEnabledFunction[B] = True,
         name: str = "",
     ) -> Self:
         """
-        Caches the child node's result in Redis (Decorator).
-        Available only if module `redis.asyncio` is installed.
+        Caches the child node's result in a key-value store (Decorator).
 
         - Status/Data: If a valid cache entry exists, returns `OK(cached_data)`.
-          Otherwise, executes the child and stores its result in Redis if it returns `OK`.
+          Otherwise, executes the child and stores its result if it returns `OK`.
 
         :param key_func: Factory function `f(blackboard) -> str` to generate the cache key.
-        :param redis_client: An asynchronous Redis client instance.
-            defaults to `_DEFAULT_GLOBAL_REDIS_INSTANCE` (which can be set by `set_default_global_redis_client()`)
+        :param store: An asynchronous key-value store instance implementing `CacheStore`.
         :param expiration: Cache TTL. Supports:
             - `int` or `float`: Seconds.
             - `timedelta`: Fixed duration.
@@ -2716,40 +3164,48 @@ class Tree[B](_ForwardingChildNode[B]):
 
             Tree()
             .Sequence()
-            ._().RedisCacher(redis_client,
-                             key_func=lambda b: f"user_data:{b.user_id}",
-                             expiration=(timedelta(minutes=5), timedelta(minutes=10)), # Random jitter
-                             value_validator=lambda b: b.version_tag # Invalidate if version changes
-                            )
+            ._().Cacher(key_func=lambda b: f"user_data:{b.user_id}",
+                        store=store,
+                        expiration=(timedelta(minutes=5), timedelta(minutes=10)), # Random jitter
+                        value_validator=lambda b: b.version_tag # Invalidate if version changes
+                       )
             ._()._().Function(fetch_expensive_data)
             .End()
         """
-        return self._attach(RedisCacherNode(key_func, redis_client, expiration, value_validator, enabled, name))
+        return self._attach(
+            CacherNode(
+                key_func,
+                store,
+                expiration,
+                value_validator,
+                enabled,
+                name,
+            )
+        )
 
     def Terminable(
         self,
-        key_func: TerminableRedisKeyFunction,
-        redis_client: async_redis.Redis | None = None,
+        key_func: TerminableKeyFunction[B],
+        store: CacheStore | None = None,
         monitor_interval_ms: float = 500,  # ms
         name: str = "",
     ) -> Self:
         """
-        Decorator that allows external interruption of a task via a Redis key.
+        Decorator that allows external interruption of a task via a store key.
 
         - First child: The main task to execute.
         - Second child (optional): The fallback task to execute if interrupted.
 
         Behavior:
-        1. Simultaneously runs the main task and polls a Redis key (generated by `key_func`).
+        1. Simultaneously runs the main task and polls a store key (generated by `key_func`).
         2. If the main task finishes first, its result is returned.
-        3. If the Redis key is created (external signal), the main task is cancelled immediately.
+        3. If the store key is created (external signal), the main task is cancelled immediately.
         4. Upon interruption, it executes the fallback child (if provided) or returns `FAIL(None)`.
-        5. Note: The monitored Redis key is automatically deleted when the node starts and when a signal is detected.
+        5. Note: The monitored signal key is automatically deleted when the node starts and when a signal is detected.
 
         :param key_func: Factory function `f(blackboard) -> str` to generate the termination signal key.
-        :param redis_client: An asynchronous Redis client instance.
-            defaults to `_DEFAULT_GLOBAL_REDIS_INSTANCE` (which can be set by `set_default_global_redis_client()`)
-        :param monitor_interval_ms: Polling interval in milliseconds to check for the Redis key.
+        :param store: An asynchronous key-value store instance implementing `CacheStore`.
+        :param monitor_interval_ms: Polling interval in milliseconds to check for the signal key.
         :param name: Optional node name.
 
         Example::
@@ -2757,7 +3213,7 @@ class Tree[B](_ForwardingChildNode[B]):
             # 1. Building the tree
             tree = (
                 Tree()
-                .Terminable(redis, lambda b: f"stop:{b.job_id}")
+                .Terminable(lambda b: f"stop:{b.job_id}", store=store)
                 ._().Function(long_running_job)      # First child
                 ._().Fallback()
                 ._()._().Function(on_interrupted)    # Optional fallback on interruption.
@@ -2765,9 +3221,9 @@ class Tree[B](_ForwardingChildNode[B]):
             )
 
             # 2. To trigger termination from an external script or process:
-            await redis.set(f"stop:{job_id}", "1")
+            await store.set(f"stop:{job_id}", "1")
         """
-        return self._attach(TerminableDecoratorNode(key_func, redis_client, monitor_interval_ms, name))
+        return self._attach(TerminableDecoratorNode(key_func, store, monitor_interval_ms, name))
 
     ##########################
     # Builder :: CompositeNode
@@ -2956,26 +3412,6 @@ class Tree[B](_ForwardingChildNode[B]):
 
 
 #############
-# Redis
-##############
-
-_DEFAULT_GLOBAL_REDIS_INSTANCE: async_redis.Redis | None
-
-
-def set_default_global_redis_client(url: str, **kwargs) -> None:
-    """Sets the default global redis_client.
-    We ensures it's threading safe.
-
-    Example::
-        tinytasktree.set_default_global_redis_client("redis://127.0.0.1:6379")
-    """
-    global _DEFAULT_GLOBAL_REDIS_INSTANCE
-    _DEFAULT_GLOBAL_REDIS_INSTANCE = cast(
-        async_redis.Redis, ThreadLocalProxy(lambda: async_redis.Redis.from_url(url, **kwargs))
-    )
-
-
-#############
 # Global Hooks
 #############
 
@@ -3027,7 +3463,7 @@ def _inspect_func_parameters_count(func: Callable) -> int:
     return len(sig.parameters)
 
 
-def _orjson_default_serializer(obj: Any):
+def _json_default_serializer(obj: Any):
     if isinstance(obj, set):
         return list(obj)
     elif isinstance(obj, datetime):
@@ -3048,14 +3484,14 @@ def _orjson_default_serializer(obj: Any):
 def _try_to_string(data: Any) -> str:
     if isinstance(data, dict):
         try:
-            return orjson.dumps(data).decode()
+            return _json_dumps(data).decode()
         except Exception:
             return str(data)
     if isinstance(data, list):
         return "[" + (",".join([_try_to_string(x) for x in data])) + "]"
     if is_dataclass(data):
         try:
-            return orjson.dumps(data, default=_orjson_default_serializer).decode()  # type: ignore
+            return _json_dumps(data, default=_json_default_serializer).decode()  # type: ignore
         except Exception:
             return str(data)
     return str(data)
@@ -3066,6 +3502,16 @@ def _as_int(value: Any) -> int | None:
         return None
     try:
         num = int(value)
+    except Exception:
+        return None
+    return num
+
+
+def _as_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        num = float(value)
     except Exception:
         return None
     return num
@@ -3183,115 +3629,99 @@ else:
 
 
 def create_http_app(trace_dir: str = ".traces") -> Any:
-    try:
-        from fastapi import FastAPI, HTTPException
-        from fastapi.responses import StreamingResponse
-        from pydantic import BaseModel
-    except Exception as e:  # pragma: no cover - optional dependency
-        raise TasktreeError("fastapi and pydantic are required for the http server") from e
-
     storage = FileTraceStorageHandler(trace_dir)
-    app = FastAPI()
+    ui_root = _find_bundled_ui_root()
 
-    class LLMRequest(BaseModel):
-        model: str
-        messages: list[JSON]
-        stream: bool = False
-        api_key: str | None = None
+    class TasktreeHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
 
-    @app.get("/trace/{trace_id}")
-    async def get_trace(trace_id: str) -> JSON:
-        try:
-            return await storage.query(trace_id)
-        except FileNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
+        def log_message(self, fmt: str, *args: Any) -> None:
+            logger.info("httpserver: " + fmt, *args)
 
-    @dataclass
-    class LLMBlackboard:
-        model: str
-        messages: list[JSON]
-        output: str = ""
-        api_key: str | None = None
-        stream_on_delta: LLMStreamOnChunkCallback1["LLMBlackboard"] | None = None
+        def do_GET(self) -> None:
+            parsed = urlparse(self.path)
+            if parsed.path == "/traces":
+                self._handle_traces()
+                return
+            if parsed.path.startswith("/trace/"):
+                trace_id = unquote(parsed.path.removeprefix("/trace/"))
+                self._handle_trace(trace_id)
+                return
+            if self._handle_ui(parsed.path):
+                return
+            self._send_json(HTTPStatus.NOT_FOUND, {"detail": f"not found: {parsed.path}"})
 
-    def _bb_stream_on_delta(b: "LLMBlackboard", fulltext: str, delta: str, finished: bool) -> None:
-        if b.stream_on_delta is not None:
-            b.stream_on_delta(b, fulltext, delta, finished)
+        def _send_json(self, status: int, payload: JSON) -> None:
+            body = _json_dumps(payload, default=_json_default_serializer)
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
-    # fmt: off
-    llm_tree = (
-        Tree[LLMBlackboard]("LLMHttp")
-        .Sequence()
-        ._().LLM(lambda b: b.model, lambda b: b.messages, stream=True, stream_on_delta=_bb_stream_on_delta, api_key=lambda b: b.api_key)
-        ._().WriteBlackboard("output")
-        .End()
-    )
-    # fmt: on
+        def _handle_trace(self, trace_id: str) -> None:
+            try:
+                payload = asyncio.run(storage.query(trace_id))
+            except FileNotFoundError as e:
+                self._send_json(HTTPStatus.NOT_FOUND, {"detail": str(e)})
+                return
+            self._send_json(HTTPStatus.OK, payload)
 
-    @app.post("/llm")
-    async def llm(req: LLMRequest) -> Any:
-        context = Context()
-        blackboard = LLMBlackboard(model=req.model, messages=req.messages, api_key=req.api_key)
+        def _handle_traces(self) -> None:
+            payload = asyncio.run(storage.list_traces())
+            self._send_json(HTTPStatus.OK, cast(JSON, payload))
 
-        if not req.stream:
-            async with context.using_blackboard(blackboard):
-                result = await llm_tree(context)
-            if not result.is_ok():
-                raise HTTPException(status_code=500, detail=str(result))
-            return {"output": blackboard.output}
+        def _handle_ui(self, path: str) -> bool:
+            if ui_root is None:
+                return False
 
-        queue: asyncio.Queue[str | None] = asyncio.Queue()
-        error_msg: list[str] = []
+            resolved = _resolve_ui_file(ui_root, path)
+            if resolved is None:
+                return False
 
-        def on_delta(b, fulltext, delta, done):
-            if delta:
-                queue.put_nowait(delta)
-            if done:
-                queue.put_nowait(None)
+            asset, content_type = resolved
+            body = asset.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return True
 
-        blackboard.stream_on_delta = on_delta
-
-        async def _stream() -> AsyncGenerator[bytes, None]:
-            async with context.using_blackboard(blackboard):
-
-                async def _run() -> None:
-                    try:
-                        result = await llm_tree(context)
-                        if not result.is_ok():
-                            raise TasktreeError(str(result))
-                    except Exception as e:
-                        error_msg.append(str(e))
-                        queue.put_nowait(f"\n[ERROR] {e}\n")
-                        queue.put_nowait(None)
-                        return
-                    queue.put_nowait(None)
-
-                task = asyncio.create_task(_run())
-                while True:
-                    chunk = await queue.get()
-                    if chunk is None:
-                        break
-                    yield chunk.encode("utf-8")
-                await task
-
-        return StreamingResponse(_stream(), media_type="text/plain")
-
-    return app
+    TasktreeHTTPRequestHandler._ui_root = ui_root  # type: ignore[attr-defined]
+    return TasktreeHTTPRequestHandler
 
 
 def run_httpserver(host: str = "127.0.0.1", port: int = 8000, trace_dir: str = ".traces") -> None:
+    handler = create_http_app(trace_dir)
+    server = http.server.ThreadingHTTPServer((host, port), handler)
+    logger.info(
+        "httpserver: serving on http://%s:%s trace_dir=%s ui=%s",
+        host,
+        port,
+        trace_dir,
+        "yes" if getattr(handler, "_ui_root", None) is not None else "no",
+    )
     try:
-        import uvicorn
-    except Exception as e:  # pragma: no cover - optional dependency
-        raise TasktreeProgrammingError("uvicorn is required to run the http server") from e
-    uvicorn.run(create_http_app(trace_dir), host=host, port=port)
+        server.serve_forever()
+    except KeyboardInterrupt:  # pragma: no cover
+        logger.info("httpserver: stopping")
+    finally:
+        server.server_close()
 
 
 def _main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(description="tinytasktree utilities")
-    parser.add_argument("--httpserver", action="store_true", help="start the built-in FastAPI server")
+    parser = argparse.ArgumentParser(
+        description="tinytasktree utilities",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--httpserver",
+        action="store_true",
+        help="start the built-in HTTP server for the trace UI and trace JSON routes",
+    )
     parser.add_argument("--host", default="127.0.0.1", help="http server host")
     parser.add_argument("--port", type=int, default=8000, help="http server port")
     parser.add_argument("--trace-dir", default=".traces", help="trace storage directory")

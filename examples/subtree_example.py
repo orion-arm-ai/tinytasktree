@@ -73,7 +73,7 @@ async def main() -> None:
 
     storage = FileTraceStorageHandler(".traces")
     trace_id = await storage.save(context.trace_root())
-    print("Trace URL:", f"http://127.0.0.1:5173/{trace_id}")
+    print("Trace URL:", f"http://127.0.0.1:8000/{trace_id}")
 
 
 if __name__ == "__main__":

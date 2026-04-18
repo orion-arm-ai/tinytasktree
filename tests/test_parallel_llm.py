@@ -33,7 +33,7 @@ def make_messages_b(b: Blackboard) -> list[tinytasktree.JSON]:
     return [{"role": "user", "content": b.prompt_b}]
 
 
-async def test_parallel_llm_calls_start_together(mock_litellm):
+async def test_parallel_llm_calls_start_together(mock_openai):
     starts: list[float] = []
     ready = asyncio.Event()
 
@@ -56,7 +56,7 @@ async def test_parallel_llm_calls_start_together(mock_litellm):
             "_hidden_params": {"response_cost": 0.0},
         }
 
-    mock_litellm(handler=handler)
+    mock_openai(handler=handler)
 
     # fmt: off
     subtree_a = (

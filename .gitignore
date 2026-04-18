@@ -1,12 +1,14 @@
 *.pyc
 .venv
-.env
+.env*
 .ruff_cache
 .traces
 ui/.vite
+ui/dist/
 node_modules
 test.py
 __pycache__
 tinytasktree.egg-info/
 uv.lock
 build
+docker-compose.yml

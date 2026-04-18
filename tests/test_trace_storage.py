@@ -39,3 +39,44 @@ async def test_file_trace_storage_handler_roundtrip():
         assert loaded["name"] == "ROOT"
         assert loaded["kind"] == "ROOT"
         assert "children" in loaded
+
+
+async def test_file_trace_storage_handler_generates_sortable_trace_ids_and_lists_desc():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        handler = tinytasktree.FileTraceStorageHandler(tmpdir)
+
+        # fmt: off
+        tree_a = (
+            tinytasktree.Tree("Alpha Demo Tree")
+            .Sequence()
+            ._().Function(lambda: "ok-a")
+            .End()
+        )
+        tree_b = (
+            tinytasktree.Tree("Beta Demo Tree")
+            .Sequence()
+            ._().Function(lambda: "ok-b")
+            .End()
+        )
+        # fmt: on
+
+        context_a = tinytasktree.Context()
+        async with context_a.using_blackboard(object()):
+            result_a = await tree_a(context_a)
+        assert result_a.is_ok()
+        trace_id_a = await handler.save(context_a.trace_root())
+
+        context_b = tinytasktree.Context()
+        async with context_b.using_blackboard(object()):
+            result_b = await tree_b(context_b)
+        assert result_b.is_ok()
+        trace_id_b = await handler.save(context_b.trace_root())
+
+        assert trace_id_a.endswith(".json") is False
+        assert "-alpha-demo-tree-" in trace_id_a
+        assert "-beta-demo-tree-" in trace_id_b
+
+        traces = await handler.list_traces()
+        assert [trace["id"] for trace in traces[:2]] == [trace_id_b, trace_id_a]
+        assert traces[0]["name"] == "Beta Demo Tree"
+        assert isinstance(traces[0]["created_at"], str)

@@ -27,7 +27,7 @@ tree = (
 
 ```python
 from dataclasses import dataclass
-from tinytasktree import Tree, JSON, Context
+from tinytasktree import Context, JSON, LLMModel, LLMProvider, Tree
 
 @dataclass
 class Blackboard:
@@ -39,10 +39,18 @@ def make_messages(b: Blackboard) -> list[JSON]:
     return [{"role": "user", "content": b.prompt}]
 
 
+provider = LLMProvider(base_url="https://llm.example/v1", api_key="...")
+model = LLMModel(
+    "gpt-4.1-mini",
+    provider=provider,
+    input_price_per_m=0.15,
+    output_price_per_m=0.60,
+)
+
 tree = (
     Tree[Blackboard]("HelloWorld")
     .Sequence()
-    ._().LLM("openrouter/openai/gpt-4.1-mini", make_messages)
+    ._().LLM(model, make_messages)
     ._().WriteBlackboard("response")
     .End()
 )
@@ -59,18 +67,17 @@ async def main():
 
 ## Requirements
 
-- Python 3.13–3.14 (3.15 is not yet supported due to upstream PyO3/fastuuid compatibility)
-- LiteLLM (only needed for `LLM` nodes)
-- Redis (only needed for `Terminable` and `RedisCacher` nodes)
-- Uvicorn (only needed for the HTTP trace server)
+- Python 3.13+
+- openai-python (only needed for `LLM` nodes)
+- A cache store backend is only needed for `Cacher` and `Terminable` nodes
 
 ## Features
 
 - Minimal, expressive tree builder API
 - Async-first execution model
 - Leaf / Composite / Decorator nodes built-in
-- LLM integration via LiteLLM
-- Redis-backed caching and termination signaling
+- LLM integration via openai-python
+- Store-backed caching and termination signaling
 - Trace collection and optional trace storage
 - UI trace viewer with HTTP server
 
@@ -94,18 +101,32 @@ pip install tinytasktree
 
 ## UI Trace Server
 
-Run the backend server and the React UI to view traces:
+Save traces into the same directory that the backend serves, for example:
+
+```python
+from tinytasktree import Context, FileTraceStorageHandler
+
+storage = FileTraceStorageHandler(".traces")
+
+context = Context()
+async with context.using_blackboard(blackboard):
+    result = await tree(context)
+
+trace_id = await storage.save(context.trace_root())
+print("Trace URL:", f"http://127.0.0.1:8000/{trace_id}")
+```
+
+Then start the backend and UI:
 
 ```bash
-# 1) start backend
 python -m tinytasktree --httpserver --host 127.0.0.1 --port 8000 --trace-dir .traces
-
-# 2) start UI dev server
-cd ui && npm run dev
-
-# 3) open the UI
-# http://127.0.0.1:5173
+# Visit http://127.0.0.1:8000
 ```
+
+Notes:
+- `--trace-dir .traces` must point to the same directory used by `FileTraceStorageHandler(".traces")`
+- Opening `http://127.0.0.1:8000/` lists saved traces in the current trace directory, newest first
+- Opening `http://127.0.0.1:8000/<trace_id>` loads a specific trace directly
 
 ![](misc/tasktree-ui.png)
 
@@ -145,7 +166,7 @@ cd ui && npm run dev
     - [Retry](#retry)
     - [While](#while)
     - [Timeout / Fallback](#timeout--fallback)
-    - [RedisCacher](#rediscacher)
+    - [Cacher](#cacher)
     - [Terminable](#terminable)
     - [Wrapper](#wrapper)
 - [Core APIs (Non-Node)](#core-apis-non-node)
@@ -345,7 +366,9 @@ Parses JSON from the last result or from a blackboard source, and returns the pa
 Usage:
 - `src`: last result (default), blackboard attr, or `(blackboard) -> str`
 - `dst`: optional blackboard attr or `(blackboard, data) -> None`
-- Uses `orjson` with `json-repair` fallback and supports JSON code fences
+- Strips common ```json fences before parsing
+- Default loader tries `json_repair` if installed, otherwise `orjson`, otherwise the standard library `json`
+- Recommended: install `json_repair` when parsing LLM-generated or otherwise non-strict JSON
 
 ```python
 tree = (
@@ -357,10 +380,22 @@ tree = (
 )
 ```
 
-another example:
+If `json_repair` is installed, no extra code is needed for tolerant parsing:
 
 ```python
-def set_parsed_value(b: blackboard, d: JSON) -> None:
+tree = (
+    Tree()
+    .Sequence()
+    ._().Function(lambda: '{"a": 1')
+    ._().ParseJSON(dst="data")
+    .End()
+)
+```
+
+Another example:
+
+```python
+def set_parsed_value(b: Blackboard, d: JSON) -> None:
     b.parsed = d
 
 tree = (
@@ -373,19 +408,35 @@ tree = (
 
 #### LLM <span id="llm"></span> <a href="#ref">[↑]</a>
 
-Calls an LLM via LiteLLM and returns the output text. Supports streaming and API key factories.
+Calls an LLM via openai-python and returns the output text. Supports streaming,
+API key factories, and OpenAI-compatible base URLs for custom LLM gateways.
 
 Usage:
 - `model` / `messages` can be values or `(blackboard) -> ...` factories
 - `stream`: bool or `(blackboard) -> bool`; `stream_on_delta` supports sync/async callbacks
 - `api_key`: string or factory `(blackboard)` / `(blackboard, model)`
-- Tracer records tokens/cost when available
+- `base_url`: string or `(blackboard) -> str | None` for OpenAI-compatible providers
+- `client_kwargs`: explicit kwargs forwarded to `AsyncOpenAI(...)`
+- `extra_body`: explicit provider-specific request body fields merged into `extra_body`
+- `**llm_call_kwargs`: regular request kwargs forwarded to `chat.completions.create(...)`
+- `LLMModel` can optionally carry `input_price_per_m` / `output_price_per_m` in USD per 1M tokens
+- Tracer records tokens when the provider returns usage
+- Cost is taken from provider metadata when available; otherwise it falls back to token usage and the `LLMModel` prices
 
 ```python
+provider = LLMProvider(base_url="https://llm.example/v1", api_key="...")
+model = LLMModel(
+    "gpt-4.1-mini",
+    provider=provider,
+    extra_body={"reasoning": {"enabled": False}},
+    input_price_per_m=0.15,
+    output_price_per_m=0.60,
+)
+
 tree = (
     Tree()
     .Sequence()
-    ._().LLM("openrouter/openai/gpt-4.1-mini", [{"role": "user", "content": "hi"}])
+    ._().LLM(model, [{"role": "user", "content": "hi"}])
     .End()
 )
 ```
@@ -393,6 +444,18 @@ tree = (
 Streaming response example:
 
 ```python
+import os
+
+from tinytasktree import LLMModel, LLMProvider, Tree
+
+LLM_BASE_URL = os.getenv("LLM_BASE_URL")
+LLM_API_KEY = os.getenv("LLM_API_KEY")
+provider = LLMProvider(
+    base_url=LLM_BASE_URL or "",
+    api_key=LLM_API_KEY,
+    client_kwargs={"timeout": 30},
+)
+
 def on_delta(b, full, delta, done, reason=""):
     if delta:
         print(delta, end="")
@@ -400,7 +463,10 @@ def on_delta(b, full, delta, done, reason=""):
 tree = (
     Tree()
     .Sequence()
-    ._().LLM(lambda b: b.model, lambda b: b.messages, stream=True, stream_on_delta=on_delta)
+    ._().LLM(lambda b: LLMModel(b.model, provider=provider), lambda b: b.messages,
+             stream=True, stream_on_delta=on_delta,
+             extra_body={"reasoning": {"enabled": False}},
+             temperature=0.2)
     .End()
 )
 ```
@@ -446,15 +512,20 @@ tree = (
 Selector is the typical choice for the fallback chain pattern:
 
 ```python
+provider = LLMProvider(base_url="https://llm.example/v1", api_key="...")
+model1 = LLMModel("model1", provider=provider)
+model2 = LLMModel("model2", provider=provider)
+model3 = LLMModel("model3", provider=provider)
+
 tree = (
     Tree()
     .Selector()
     ._().Timeout(20)
-    ._()._().LLM("model1", llm_message)
+    ._()._().LLM(model1, llm_message)
     ._().Timeout(20)
-    ._()._().LLM("model2", llm_message)
+    ._()._().LLM(model2, llm_message)
     ._().Timeout(20)
-    ._()._().LLM("model3", llm_message)
+    ._()._().LLM(model3, llm_message)
     .End()
 )
 ```
@@ -693,7 +764,7 @@ tree = (
 )
 ```
 
-With `.Fallback()` example::
+With `.Fallback()`:
 
 ```python
 tree = (
@@ -706,12 +777,12 @@ tree = (
 )
 ```
 
-#### RedisCacher <span id="rediscacher"></span> <a href="#ref">[↑]</a>
+#### Cacher <span id="cacher"></span> <a href="#ref">[↑]</a>
 
-Caches child results in Redis. Optional `value_validator` invalidates stale cache.
+Caches child results in a key-value store. Optional `value_validator` invalidates stale cache.
 
 Usage:
-- `key_func(blackboard) -> str`, optional `redis_client`
+- `key_func(blackboard) -> str`, required `store`
 - `expiration`: seconds, `timedelta`, or random `(min, max)`
 - `value_validator`: `(blackboard)` or `(blackboard, tracer)`
 - `enabled`: bool or `(blackboard) -> bool`
@@ -719,19 +790,36 @@ Usage:
 ```python
 tree = (
     Tree()
-    .RedisCacher(redis_client, key_func=lambda b: b.key, enabled=lambda b: b.use_cache)
+    .Cacher(key_func=lambda b: b.key, store=store, enabled=lambda b: b.use_cache)
     ._().Function(expensive_call)
     .End()
 )
 ```
 
-With a `value_validator` example, in such case: the cache is only considered a hit if this
-value matches the one stored during the cache set. Useful for invalidating cache when dependent logic or state changes::
+Redis example:
+
+`tinytasktree` itself does not depend on Redis, but `redis.asyncio.Redis` can be used directly as the `store`:
+
+```python
+import redis.asyncio as redis
+
+store = redis.Redis.from_url("redis://127.0.0.1:6379")
+
+tree = (
+    Tree()
+    .Cacher(key_func=lambda b: f"user:{b.user_id}", store=store, expiration=60)
+    ._().Function(fetch_user)
+    .End()
+)
+```
+
+With a `value_validator`, the cache is only considered a hit if this
+value matches the one stored during the cache set. This is useful for invalidating cache when dependent logic or state changes:
 
 ```python
 tree = (
     Tree()
-    .RedisCacher(redis_client, key_func=lambda b: f"user:{b.user_id}", value_validator=lambda b: b.version)
+    .Cacher(key_func=lambda b: f"user:{b.user_id}", store=store, value_validator=lambda b: b.version)
     ._().Function(fetch_user)
     .End()
 )
@@ -739,17 +827,17 @@ tree = (
 
 #### Terminable <span id="terminable"></span> <a href="#ref">[↑]</a>
 
-Runs a child while polling a Redis key for termination. Optionally runs a fallback.
+Runs a child while polling a store key for termination. Optionally runs a fallback.
 
 Usage:
-- `key_func(blackboard) -> redis_key`, optional `redis_client`
+- `key_func(blackboard) -> signal_key`, required `store`
 - Monitors until key exists; then cancels child
 - 1 child (main) or 2 (main + fallback)
 
 ```python
 tree = (
     Tree()
-    .Terminable(lambda b: f"stop:{b.job_id}")
+    .Terminable(lambda b: f"stop:{b.job_id}", store=store)
     ._().Function(A)
     ._().Fallback()
     ._()._().Function(B)
@@ -795,14 +883,14 @@ tree = (
 - `TraceStorageHandler` / `FileTraceStorageHandler`: save and load traces
 - `register_global_hook_after_spawned_task_finish(hook)`: hook for Parallel/Gather/Terminable tasks
 - `set_default_llm_api_key_factory(factory_or_key)`: default LLM API key or factory
-- `set_default_global_redis_client(url, **kwargs)`: global Redis client for Redis nodes
-- `run_httpserver(host, port, trace_dir)` / `create_http_app(...)`: HTTP trace server
+- `run_httpserver(host, port, trace_dir)` / `create_http_app(...)`: built-in HTTP trace server
 
 ## Contributing <span id="contributing"></span>
 
 - Install dev dependencies: `uv sync --dev`
+- Build a wheel or sdist with bundled UI assets: `uv build`
 - Lint: `uv run ruff check .`
-- Test: `uv run pytest` (requires a local Redis on `redis://127.0.0.1:6379`)
+- Test: `uv run pytest`
 
 ## License <span id="license"></span>
 

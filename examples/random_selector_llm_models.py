@@ -8,16 +8,17 @@ import os
 import sys
 from dataclasses import dataclass
 
-import litellm
-
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # ensure tinytasktree is importable
-from tinytasktree import JSON, Context, FileTraceStorageHandler, Tree
-
-litellm.suppress_debug_info = True
-litellm.set_verbose = False
+from tinytasktree import JSON, Context, FileTraceStorageHandler, LLMModel, LLMProvider, Tree
 
 # Requirements:
-#   - OPENROUTER_API_KEY set for OpenRouter access via LiteLLM
+#   - LLM_BASE_URL and LLM_API_KEY set for your LLM service
+LLM_BASE_URL = os.getenv("LLM_BASE_URL")
+LLM_API_KEY = os.getenv("LLM_API_KEY")
+PROVIDER = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
+MODEL_A = LLMModel("qwen/qwen3.5-35b-a3b", provider=PROVIDER, extra_body={"reasoning": {"enabled": False}})
+MODEL_B = LLMModel("qwen/qwen3.5-35b-a3b", provider=PROVIDER, extra_body={"reasoning": {"enabled": False}})
+MODEL_C = LLMModel("qwen/qwen3.5-35b-a3b", provider=PROVIDER, extra_body={"reasoning": {"enabled": False}})
 
 
 @dataclass
@@ -43,9 +44,9 @@ tree = (
     Tree[Blackboard]("RandomSelectorLLM")
     .Sequence()
     ._().RandomSelector(weights=[0.4, 0.4, 0.2]) # sets weights=None for equal probability
-    ._()._().LLM("openrouter/openai/gpt-oss-120b:free", make_messages, stream=True, stream_on_delta=on_delta, name="ModelA")
-    ._()._().LLM("openrouter/google/gemma-3-27b-it:free", make_messages, stream=True, stream_on_delta=on_delta, name="ModelB")
-    ._()._().LLM("openrouter/openai/gpt-4.1-mini", make_messages, stream=True, stream_on_delta=on_delta, name="ModelC")
+    ._()._().LLM(MODEL_A, make_messages, stream=True, stream_on_delta=on_delta, name="ModelA")
+    ._()._().LLM(MODEL_B, make_messages, stream=True, stream_on_delta=on_delta, name="ModelB")
+    ._()._().LLM(MODEL_C, make_messages, stream=True, stream_on_delta=on_delta, name="ModelC")
     ._().WriteBlackboard(write_response)
     .End()
 )
@@ -64,7 +65,7 @@ async def main() -> None:
 
     storage = FileTraceStorageHandler(".traces")
     trace_id = await storage.save(context.trace_root())
-    print("Trace URL:", f"http://127.0.0.1:5173/{trace_id}")
+    print("Trace URL:", f"http://127.0.0.1:8000/{trace_id}")
 
 
 if __name__ == "__main__":

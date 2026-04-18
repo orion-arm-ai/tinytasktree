@@ -39,7 +39,7 @@ def _restore_hooks(hooks):
     tinytasktree._GLOBAL_HOOK_AFTER_SPAWNED_TASK_FINISH.extend(hooks)
 
 
-async def test_spawned_task_finish_hook_parallel_gather_terminable(redis_url):
+async def test_spawned_task_finish_hook_parallel_gather_terminable(memory_store):
     calls: list[str] = []
     hooks = _reset_hooks()
 
@@ -95,12 +95,10 @@ async def test_spawned_task_finish_hook_parallel_gather_terminable(redis_url):
         assert result.is_ok()
         assert len(calls) == 2
 
-        tinytasktree.set_default_global_redis_client(redis_url)
-
         # fmt: off
         terminable_tree = (
             tinytasktree.Tree[Blackboard]("HookTerminable")
-            .Terminable(lambda b: f"test:terminate:{b.job_id}", monitor_interval_ms=10)
+            .Terminable(lambda b: f"test:terminate:{b.job_id}", store=memory_store, monitor_interval_ms=10)
             ._().Function(lambda: "done")
             .End()
         )

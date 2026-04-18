@@ -12,9 +12,19 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # e
 import asyncio
 from dataclasses import dataclass
 
-from tinytasktree import JSON, Context, FileTraceStorageHandler, Tree
+from tinytasktree import JSON, Context, FileTraceStorageHandler, LLMModel, LLMProvider, Tree
 
-# Running this example requires setting OS ENV variable `OPENROUTER_API_KEY`.
+# Running this example requires setting `LLM_BASE_URL` and `LLM_API_KEY`.
+LLM_BASE_URL = os.getenv("LLM_BASE_URL")
+LLM_API_KEY = os.getenv("LLM_API_KEY")
+PROVIDER = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
+MODEL = LLMModel(
+    "qwen/qwen-plus",
+    provider=PROVIDER,
+    extra_body={"reasoning": {"enabled": False}},
+    input_price_per_m=0.325,
+    output_price_per_m=1.95,
+)
 
 
 @dataclass
@@ -39,7 +49,7 @@ def on_delta(b: Blackboard, fulltext: str, delta: str, finished: bool) -> None:
 tree = (
     Tree[Blackboard]("HelloWorld")
     .Sequence()
-    ._().LLM("openrouter/google/gemini-2.5-flash-lite", make_messages, stream=True, stream_on_delta=on_delta)
+    ._().LLM(MODEL, make_messages, stream=True, stream_on_delta=on_delta)
     ._().WriteBlackboard(write_response)
     .End()
 )
@@ -58,7 +68,7 @@ async def main() -> None:
 
     storage = FileTraceStorageHandler(".traces")
     trace_id = await storage.save(context.trace_root())
-    print("Trace URL:", f"http://127.0.0.1:5173/{trace_id}")
+    print("Trace URL:", f"http://127.0.0.1:8000/{trace_id}")
 
 
 if __name__ == "__main__":

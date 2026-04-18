@@ -11,10 +11,14 @@ from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # ensure tinytasktree is importable
 
-from tinytasktree import JSON, Context, FileTraceStorageHandler, Tree
+from tinytasktree import JSON, Context, FileTraceStorageHandler, LLMModel, LLMProvider, Tree
 
 # Requirements:
-#   - OPENROUTER_API_KEY set for OpenRouter access via LiteLLM
+#   - LLM_BASE_URL and LLM_API_KEY set for your LLM service
+LLM_BASE_URL = os.getenv("LLM_BASE_URL")
+LLM_API_KEY = os.getenv("LLM_API_KEY")
+PROVIDER = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
+MODEL = LLMModel("qwen/qwen3.6-plus", provider=PROVIDER, extra_body={"reasoning": {"enabled": False}})
 
 
 @dataclass
@@ -63,7 +67,7 @@ expand_subtree = (
     Tree[SubBlackboard]("ExpandTopic")
     .Return(return_expansion)
     ._().Sequence()
-    ._()._().LLM("openrouter/openai/gpt-4.1-mini", make_messages)
+    ._()._().LLM(MODEL, make_messages)
     ._()._().ParseJSON(dst=store_children)
     .End()
 )
@@ -115,7 +119,7 @@ async def main() -> None:
     print_tree(root.root_topic, root.tree, max_depth=3)
     storage = FileTraceStorageHandler(".traces")
     trace_id = await storage.save(context.trace_root())
-    print("Trace URL:", f"http://127.0.0.1:5173/{trace_id}")
+    print("Trace URL:", f"http://127.0.0.1:8000/{trace_id}")
 
 
 def print_tree(root: str, tree: dict[str, list[str]], max_depth: int = 3) -> None:

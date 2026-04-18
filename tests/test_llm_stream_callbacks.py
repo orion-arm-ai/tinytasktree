@@ -23,7 +23,7 @@ def make_messages(b: Blackboard) -> list[tinytasktree.JSON]:
     return [{"role": "user", "content": b.prompt}]
 
 
-async def test_llm_stream_on_delta_sync(mock_litellm):
+async def test_llm_stream_on_delta_sync(mock_openai):
     seen: list[tuple[str, str, bool]] = []
 
     def on_delta(b: Blackboard, full: str, delta: str, finished: bool):
@@ -41,7 +41,7 @@ async def test_llm_stream_on_delta_sync(mock_litellm):
             }
         return gen()
 
-    mock_litellm(handler=handler)
+    mock_openai(handler=handler)
 
     # fmt: off
     tree = (
@@ -64,7 +64,7 @@ async def test_llm_stream_on_delta_sync(mock_litellm):
     assert seen[2] == ("hello", "", True)
 
 
-async def test_llm_stream_on_delta_async(mock_litellm):
+async def test_llm_stream_on_delta_async(mock_openai):
     seen: list[tuple[str, str, bool, str]] = []
 
     async def on_delta(b: Blackboard, full: str, delta: str, finished: bool, reason: str):
@@ -82,7 +82,7 @@ async def test_llm_stream_on_delta_async(mock_litellm):
             }
         return gen()
 
-    mock_litellm(handler=handler)
+    mock_openai(handler=handler)
 
     # fmt: off
     tree = (

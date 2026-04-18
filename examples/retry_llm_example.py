@@ -9,16 +9,15 @@ import random
 import sys
 from dataclasses import dataclass
 
-import litellm
-
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # ensure tinytasktree is importable
-from tinytasktree import JSON, Context, FileTraceStorageHandler, Result, Tree
-
-litellm.suppress_debug_info = True
-litellm.set_verbose = False
+from tinytasktree import JSON, Context, FileTraceStorageHandler, LLMModel, LLMProvider, Result, Tree
 
 # Requirements:
-#   - OPENROUTER_API_KEY set for OpenRouter access via LiteLLM
+#   - LLM_BASE_URL and LLM_API_KEY set for your LLM service
+LLM_BASE_URL = os.getenv("LLM_BASE_URL")
+LLM_API_KEY = os.getenv("LLM_API_KEY")
+PROVIDER = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
+MODEL = LLMModel("qwen/qwen3.6-plus", provider=PROVIDER, extra_body={"reasoning": {"enabled": False}})
 
 
 @dataclass
@@ -73,7 +72,12 @@ tree = (
     ._().Function(init_problem)
     ._().Retry(5, sleep_secs=1)  # Up to 5 attempts
     ._()._().Sequence()
-    ._()._()._().LLM("openrouter/openai/gpt-5-nano", make_messages, stream=True, stream_on_delta=on_delta)
+    ._()._()._().LLM(
+        MODEL,
+        make_messages,
+        stream=True,
+        stream_on_delta=on_delta,
+    )
     ._()._()._().ParseJSON(dst="parsed")
     ._()._()._().Function(validate_answer)
     .End()
@@ -94,12 +98,7 @@ async def main() -> None:
 
     storage = FileTraceStorageHandler(".traces")
     trace_id = await storage.save(context.trace_root())
-    print("Trace URL:", f"http://127.0.0.1:5173/{trace_id}")
-
-    # prevent litellm introducing wired at-exit warnings..
-
-    await litellm.close_litellm_async_clients()
-
+    print("Trace URL:", f"http://127.0.0.1:8000/{trace_id}")
 
 if __name__ == "__main__":
     asyncio.run(main())

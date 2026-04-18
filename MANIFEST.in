@@ -15,5 +15,8 @@ prune examples
 prune node_modules
 prune tests
 prune tinytasktree.egg-info
-prune ui
+prune ui/node_modules
+prune ui/src
+prune ui/.vite
 prune build
+recursive-include ui/dist *
