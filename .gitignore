@@ -11,3 +11,4 @@ __pycache__
 tinytasktree.egg-info/
 uv.lock
 build
+docker-compose.yml
