@@ -1606,17 +1606,17 @@ function TraceUI() {
                     <div className="view-mode-switch" role="tablist" aria-label="Trace view mode">
                         <button
                             type="button"
-                            className={`view-mode-btn ${viewMode === "flow" ? "active" : ""}`}
-                            onClick={() => setViewMode("flow")}
-                        >
-                            Flow
-                        </button>
-                        <button
-                            type="button"
                             className={`view-mode-btn ${viewMode === "stack" ? "active" : ""}`}
                             onClick={() => setViewMode("stack")}
                         >
                             Stack
+                        </button>
+                        <button
+                            type="button"
+                            className={`view-mode-btn ${viewMode === "flow" ? "active" : ""}`}
+                            onClick={() => setViewMode("flow")}
+                        >
+                            Flow
                         </button>
                     </div>
                     <Space direction="vertical" size={4} className="toggle-stack">
@@ -1684,16 +1684,16 @@ function TraceUI() {
                                     <MiniMap
                                         pannable
                                         zoomable
-                                        maskColor="rgba(200, 200, 200, 0.8)"
-                                        style={{ backgroundColor: "#ffffff", border: "2px solid #000000" }}
+                                        maskColor="rgba(0, 0, 0, 0.6)"
+                                        style={{ backgroundColor: "#0d1117", border: "1px solid #30363d" }}
                                         nodeColor={(node) => {
-                                            if ((node.data as TraceNodeData)?.isSelected || node.selected) return "#000000";
+                                            if ((node.data as TraceNodeData)?.isSelected || node.selected) return "#58a6ff";
                                             const data = node.data as TraceNodeData;
-                                            if (data.status === "FAIL") return "#d11f1f";
+                                            if (data.status === "FAIL") return "#f85149";
                                             if (subtreeColorOn && data.subtreeColor) {
-                                                return toPastel(data.subtreeColor, 0.35);
+                                                return data.subtreeColor;
                                             }
-                                            return "#888888";
+                                            return "#8b949e";
                                         }}
                                     />
                                     <Controls showInteractive={false} />
