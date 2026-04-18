@@ -26,7 +26,6 @@ import {
     Tabs,
     Tag,
     theme,
-    Tooltip,
     Typography,
 } from "antd";
 import Highlighter from "react-highlight-words";
@@ -249,7 +248,6 @@ type TraceNodeData = {
     durationMs: number;
     cost: number;
     subtreeColor: string | null;
-    subtreeColored: boolean;
     isFolded: boolean;
     isSelected?: boolean;
 };
@@ -848,7 +846,7 @@ function TraceCard(props: NodeProps<TraceNodeData>) {
     if (status === "UNKNOWN") borderColor = "#6e7681";
     if (isSelected) borderColor = "#58a6ff";
     const borderWidth = isSelected ? 6 : status === "FAIL" ? 5 : 4;
-    const background = data.subtreeColored && data.subtreeColor
+    const background = data.subtreeColor
         ? `linear-gradient(135deg, rgba(13, 17, 23, 0.98) 0%, ${hexToRgba(data.subtreeColor, 0.18)} 100%)`
         : "linear-gradient(180deg, rgba(17, 24, 39, 0.98) 0%, rgba(13, 17, 23, 0.98) 100%)";
     const foldedPrefix = data.isFolded ? "▸ " : "";
@@ -977,7 +975,6 @@ function TraceUI() {
     const searchListRef = useRef<HTMLDivElement | null>(null);
     const stackListRef = useRef<HTMLDivElement | null>(null);
     const fitTimer = useRef<number | null>(null);
-    const [subtreeColorOn, setSubtreeColorOn] = useState(true);
     const maxDepth: number | null = null;
     const [autoFoldOn, setAutoFoldOn] = useState(true);
     const [manualFoldIds, setManualFoldIds] = useState<Set<string>>(new Set());
@@ -1086,7 +1083,6 @@ function TraceUI() {
                     durationMs: item.node.duration || 0,
                     cost: item.node.cost || 0,
                     subtreeColor,
-                    subtreeColored: subtreeColorOn,
                     isFolded,
                     isSelected: selectedId === item.id,
                 },
@@ -1107,7 +1103,7 @@ function TraceUI() {
                 markerStart: undefined,
             }));
         return { nodes: nodesLocal, edges: edgesLocal, nodeMap: nodeMapLocal };
-    }, [trace, subtreeColorOn, maxDepth, autoFoldOn, activeFoldIds, selectedId]);
+    }, [trace, maxDepth, autoFoldOn, activeFoldIds, selectedId]);
 
     const { searchIndex, searchNodeMap } = useMemo(() => {
         if (!trace) {
@@ -1855,12 +1851,6 @@ function TraceUI() {
                         </Space>
                         <Text className="top-hint">Double-click a node to fold/unfold its subtree</Text>
                     </Space>
-                    <Tooltip title="Color subtrees by top-level Tree nodes">
-                        <Space align="center">
-                            <Switch checked={subtreeColorOn} onChange={setSubtreeColorOn} size="small" />
-                            <Text className="toggle-label">Subtree color</Text>
-                        </Space>
-                    </Tooltip>
                 </Space>
                 {loadError && (
                     <Alert
@@ -1909,7 +1899,7 @@ function TraceUI() {
                                             if ((node.data as TraceNodeData)?.isSelected || node.selected) return "#58a6ff";
                                             const data = node.data as TraceNodeData;
                                             if (data.status === "FAIL") return "#f85149";
-                                            if (subtreeColorOn && data.subtreeColor) {
+                                            if (data.subtreeColor) {
                                                 return data.subtreeColor;
                                             }
                                             return "#8b949e";
@@ -1985,7 +1975,7 @@ function TraceUI() {
                                         <span className="stack-legend-item"><span className="stack-legend-swatch normal" /> Node</span>
                                         <span className="stack-legend-item"><span className="stack-legend-swatch fail" /> Error</span>
                                         <span className="stack-legend-item"><span className="stack-legend-swatch path" /> Selected path</span>
-                                        {subtreeColorOn && <span className="stack-legend-note">right edge = subtree group</span>}
+                                        <span className="stack-legend-note">right edge = subtree group</span>
                                     </div>
                                     {selectedPathIds.length > 0 && (
                                         <div className="stack-pathbar">
@@ -2020,7 +2010,7 @@ function TraceUI() {
                                         const tone = getNodeTone(row.node.kind);
                                         const KindIcon = tone.icon;
                                         const subtreeBackground =
-                                            subtreeColorOn && row.subtreeColor && row.status !== "FAIL"
+                                            row.subtreeColor && row.status !== "FAIL"
                                                 ? `linear-gradient(to right, transparent 0%, ${hexToRgba(row.subtreeColor, compactMode ? 0.06 : 0.03)} 36%, ${hexToRgba(row.subtreeColor, compactMode ? 0.16 : 0.11)} 100%)`
                                                 : undefined;
                                         const accentBackground =
@@ -2036,7 +2026,7 @@ function TraceUI() {
                                                 data-stack-id={row.id}
                                                 className={`stack-row ${compactMode ? "compact" : ""} ${isSelected ? "selected" : ""} ${inSelectedPath ? "path" : ""} ${row.status === "FAIL" ? "fail" : ""}`}
                                                 style={{
-                                                    borderRightColor: subtreeColorOn && row.subtreeColor ? row.subtreeColor : undefined,
+                                                    borderRightColor: row.subtreeColor || undefined,
                                                     backgroundImage: [accentBackground, subtreeBackground].filter(Boolean).join(", "),
                                                 }}
                                                 onClick={() => setSelectedId(row.id)}
@@ -2060,16 +2050,16 @@ function TraceUI() {
                                                             {hasChildren ? (isFolded ? "+" : "-") : "·"}
                                                         </span>
                                                     )}
-                                                    {subtreeColorOn && row.subtreeColor && (
+                                                    {row.subtreeColor && (
                                                         <span className="stack-subtree-dot" style={{ backgroundColor: row.subtreeColor }} />
                                                     )}
                                                     <div className="stack-main-copy">
                                                         <div className="stack-main-line">
-                                                            <span className="stack-name">{row.node.name || "(unnamed)"}</span>
                                                             <span className={compactMode ? tone.compactClassName : tone.className}>
                                                                 <KindIcon className="stack-kind-icon" />
                                                                 {tone.label}
                                                             </span>
+                                                            <span className="stack-name">{row.node.name || "(unnamed)"}</span>
                                                             <span className={`stack-status stack-status-${row.status.toLowerCase()}`}>{row.status}</span>
                                                         </div>
                                                         {!compactMode && tokenLine && <div className="stack-subline">{tokenLine}</div>}
