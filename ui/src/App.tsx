@@ -56,7 +56,7 @@ function LucideIcon({ nodes, className }: { nodes: LucideNode[]; className?: str
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
-            strokeWidth="2"
+            strokeWidth="2.2"
             strokeLinecap="round"
             strokeLinejoin="round"
             aria-hidden="true"
@@ -805,9 +805,13 @@ function TraceCard(props: NodeProps<TraceNodeData>) {
             <Handle type="target" position={Position.Left} className="trace-handle" />
             <Handle type="source" position={Position.Right} className="trace-handle" />
             <div className="trace-card-title">
-                <span className="trace-card-kind-icon"><KindIcon /></span>
-                {foldedPrefix}
-                {data.node.name || "(unnamed)"}
+                <span className="trace-card-kind-icon" style={{ "--tone-accent": tone.accent } as React.CSSProperties}>
+                    <KindIcon />
+                </span>
+                <span className="trace-card-name">
+                    {foldedPrefix}
+                    {data.node.name || "(unnamed)"}
+                </span>
             </div>
             <Tag color={statusColor(status)} className="trace-status">
                 {status}
@@ -1530,7 +1534,7 @@ function TraceUI() {
                 <Space size={16} align="center" className="top-bar-left">
                     <button type="button" className="brand-button" onClick={() => void loadTraceList()}>
                         <Title level={4} className="brand">
-                            tinytasktree Trace UI
+                            tinytasktree ui
                         </Title>
                     </button>
                 </Space>
@@ -1807,8 +1811,13 @@ function TraceUI() {
                                                     )}
                                                     <div className="stack-main-copy">
                                                         <div className="stack-main-line">
-                                                            <span className={compactMode ? tone.compactClassName : tone.className}>
-                                                                <KindIcon className="stack-kind-icon" />
+                                                            <span
+                                                                className={compactMode ? tone.compactClassName : tone.className}
+                                                                style={{ "--tone-accent": tone.accent } as React.CSSProperties}
+                                                            >
+                                                                <span className="stack-kind-icon-shell">
+                                                                    <KindIcon className="stack-kind-icon" />
+                                                                </span>
                                                                 {tone.label}
                                                             </span>
                                                             <span className="stack-name">{row.node.name || "(unnamed)"}</span>
