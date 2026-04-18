@@ -3336,13 +3336,14 @@ else:
 
 def create_http_app(trace_dir: str = ".traces") -> Any:
     storage = FileTraceStorageHandler(trace_dir)
+    http_llm_api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
+    http_llm_base_url = os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL")
 
     @dataclass
     class LLMBlackboard:
         model: str
         messages: list[JSON]
         output: str = ""
-        api_key: str | None = None
         stream_on_delta: LLMStreamOnChunkCallback1["LLMBlackboard"] | None = None
 
     def _bb_stream_on_delta(b: "LLMBlackboard", fulltext: str, delta: str, finished: bool) -> None:
@@ -3354,7 +3355,6 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
         model: str
         messages: list[JSON]
         stream: bool = False
-        api_key: str | None = None
         llm_call_kwargs: JSON = field(default_factory=dict)
 
     def _make_llm_tree(stream: bool, llm_call_kwargs: JSON) -> Tree["LLMBlackboard"]:
@@ -3369,7 +3369,8 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
                 lambda b: b.messages,
                 stream=stream,
                 stream_on_delta=_bb_stream_on_delta if stream else None,
-                api_key=lambda b: b.api_key,
+                api_key=http_llm_api_key,
+                base_url=http_llm_base_url,
                 **llm_call_kwargs,
             )
             ._().WriteBlackboard("output")
@@ -3379,7 +3380,7 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
 
     async def llm(req: LLMRequest) -> tuple[int, JSON]:
         context = Context()
-        blackboard = LLMBlackboard(model=req.model, messages=req.messages, api_key=req.api_key)
+        blackboard = LLMBlackboard(model=req.model, messages=req.messages)
         llm_tree = _make_llm_tree(False, req.llm_call_kwargs)
 
         async with context.using_blackboard(blackboard):
@@ -3390,7 +3391,7 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
 
     async def llm_stream(req: LLMRequest, chunks: queue.Queue[str | None]) -> None:
         context = Context()
-        blackboard = LLMBlackboard(model=req.model, messages=req.messages, api_key=req.api_key)
+        blackboard = LLMBlackboard(model=req.model, messages=req.messages)
         stream_llm_tree = _make_llm_tree(True, req.llm_call_kwargs)
 
         def on_delta(b: "LLMBlackboard", fulltext: str, delta: str, done: bool) -> None:
@@ -3450,21 +3451,19 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
             model = payload.get("model")
             messages = payload.get("messages")
             stream = payload.get("stream", False)
-            api_key = payload.get("api_key")
-            llm_call_kwargs = {k: v for k, v in payload.items() if k not in {"model", "messages", "stream", "api_key"}}
+            if "api_key" in payload:
+                raise TasktreeError("field 'api_key' is not allowed; configure LLM_API_KEY on the server")
+            llm_call_kwargs = {k: v for k, v in payload.items() if k not in {"model", "messages", "stream"}}
             if not isinstance(model, str) or not model:
                 raise TasktreeError("field 'model' must be a non-empty string")
             if not isinstance(messages, list):
                 raise TasktreeError("field 'messages' must be a list")
             if not isinstance(stream, bool):
                 raise TasktreeError("field 'stream' must be a bool")
-            if api_key is not None and not isinstance(api_key, str):
-                raise TasktreeError("field 'api_key' must be a string or null")
             return LLMRequest(
                 model=model,
                 messages=cast(list[JSON], messages),
                 stream=stream,
-                api_key=api_key,
                 llm_call_kwargs=llm_call_kwargs,
             )
 
@@ -3550,8 +3549,22 @@ def run_httpserver(host: str = "127.0.0.1", port: int = 8000, trace_dir: str = "
 def _main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(description="tinytasktree utilities")
-    parser.add_argument("--httpserver", action="store_true", help="start the built-in HTTP server")
+    parser = argparse.ArgumentParser(
+        description="tinytasktree utilities",
+        epilog=(
+            "Built-in HTTP server LLM configuration:\n"
+            "  LLM_API_KEY      primary server-side API key\n"
+            "  OPENAI_API_KEY   compatibility fallback for API key\n"
+            "  LLM_BASE_URL     primary server-side base URL\n"
+            "  OPENAI_BASE_URL  compatibility fallback for base URL"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--httpserver",
+        action="store_true",
+        help="start the built-in HTTP server; LLM auth/config comes from LLM_API_KEY/LLM_BASE_URL env vars",
+    )
     parser.add_argument("--host", default="127.0.0.1", help="http server host")
     parser.add_argument("--port", type=int, default=8000, help="http server port")
     parser.add_argument("--trace-dir", default=".traces", help="trace storage directory")

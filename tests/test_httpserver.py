@@ -71,7 +71,10 @@ def test_httpserver_trace_endpoint(tmp_path):
 
 
 def test_httpserver_llm_non_stream(mock_openai, tmp_path):
+    recorded = {}
+
     async def handler(**kwargs):
+        recorded.update(kwargs)
         return {
             "choices": [{"message": {"content": "hello"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
@@ -93,6 +96,107 @@ def test_httpserver_llm_non_stream(mock_openai, tmp_path):
         data = json.loads(resp.read().decode())
         assert resp.status == 200
         assert data == {"output": "hello"}
+        assert recorded["client_kwargs"].get("api_key") is None
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_httpserver_llm_uses_server_env_api_key(mock_openai, tmp_path, monkeypatch):
+    recorded = {}
+
+    async def handler(**kwargs):
+        recorded.update(kwargs)
+        return {
+            "choices": [{"message": {"content": "hello"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "_hidden_params": {"response_cost": 0.0},
+        }
+
+    monkeypatch.setenv("LLM_API_KEY", "server-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    mock_openai(handler=handler)
+
+    server, thread = _serve(str(tmp_path))
+    try:
+        body = json.dumps(
+            {
+                "model": "mock/basic",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": False,
+            }
+        ).encode()
+        resp = _request(server, "POST", "/llm", body=body)
+        data = json.loads(resp.read().decode())
+        assert resp.status == 200
+        assert data == {"output": "hello"}
+        assert recorded["client_kwargs"].get("api_key") == "server-key"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_httpserver_llm_uses_server_env_base_url(mock_openai, tmp_path, monkeypatch):
+    recorded = {}
+
+    async def handler(**kwargs):
+        recorded.update(kwargs)
+        return {
+            "choices": [{"message": {"content": "hello"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "_hidden_params": {"response_cost": 0.0},
+        }
+
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    mock_openai(handler=handler)
+
+    server, thread = _serve(str(tmp_path))
+    try:
+        body = json.dumps(
+            {
+                "model": "mock/basic",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": False,
+            }
+        ).encode()
+        resp = _request(server, "POST", "/llm", body=body)
+        data = json.loads(resp.read().decode())
+        assert resp.status == 200
+        assert data == {"output": "hello"}
+        assert recorded["client_kwargs"].get("base_url") == "https://llm.example/v1"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_httpserver_llm_rejects_request_api_key(mock_openai, tmp_path):
+    async def handler(**kwargs):
+        return {
+            "choices": [{"message": {"content": "ignored"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "_hidden_params": {"response_cost": 0.0},
+        }
+
+    mock_openai(handler=handler)
+
+    server, thread = _serve(str(tmp_path))
+    try:
+        body = json.dumps(
+            {
+                "model": "mock/basic",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": False,
+                "api_key": "request-key",
+            }
+        ).encode()
+        resp = _request(server, "POST", "/llm", body=body)
+        data = json.loads(resp.read().decode())
+        assert resp.status == 400
+        assert "api_key" in data["detail"]
     finally:
         server.shutdown()
         server.server_close()
