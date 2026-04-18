@@ -93,22 +93,47 @@ pip install tinytasktree
 
 ## UI Trace Server
 
-Run the backend server and the React UI to view traces:
+Run the backend server and the React UI to view traces.
+
+Save traces into the same directory that the backend serves, for example:
+
+```python
+from tinytasktree import Context, FileTraceStorageHandler
+
+storage = FileTraceStorageHandler(".traces")
+
+context = Context()
+async with context.using_blackboard(blackboard):
+    result = await tree(context)
+
+trace_id = await storage.save(context.trace_root())
+print("Trace URL:", f"http://127.0.0.1:5173/{trace_id}")
+```
+
+Then start the backend and UI:
 
 ```bash
-# 1) start backend
+# 0) from the repo root, install UI deps once
+(cd ui && npm install)
+
+# 1) start backend from the repo root
 python -m tinytasktree --httpserver --host 127.0.0.1 --port 8000 --trace-dir .traces
 
-# 2) start UI dev server
-cd ui && npm run dev
+# 2) in another terminal, start the UI dev server
+(cd ui && npm run dev)
 
-# 3) open the UI
-# http://127.0.0.1:5173
+# 3) open the trace
+# http://127.0.0.1:5173/<trace_id>
 
 # optional: for `npm run preview` or a static `ui/dist` deploy,
 # set the backend origin explicitly at build time
 VITE_API_BASE_URL=http://127.0.0.1:8000 npm run build
 ```
+
+Notes:
+- `--trace-dir .traces` must point to the same directory used by `FileTraceStorageHandler(".traces")`
+- Opening `http://127.0.0.1:5173/<trace_id>` loads that specific trace directly
+- If you only open `http://127.0.0.1:5173`, the UI starts without a selected trace
 
 ![](misc/tasktree-ui.png)
 
