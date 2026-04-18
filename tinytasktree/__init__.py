@@ -79,8 +79,8 @@ Composite Nodes:
 
 ### Trace Supports
 
-* Trace UI Viewer (Also As A Tree)
 * Optional trace storage via `TraceStorageHandler` (e.g., `FileTraceStorageHandler` saves JSON to disk)
+* Trace UI Viewer: `python -m tinytasktree --httpserver --host 127.0.0.1 --port 8000 --trace-dir .traces`
 
 Example::
 
@@ -89,24 +89,6 @@ Example::
     trace_json = await storage.query(trace_id)
 
 Note: It is safe to reuse a global `FileTraceStorageHandler` instance across runs.
-
-### UI Server
-
-By default, the built-in HTTP server can serve the bundled UI directly:
-
-    # 1) start backend
-    python -m tinytasktree --httpserver --host 127.0.0.1 --port 8000 --trace-dir .traces
-    # 2) open a saved trace
-    http://127.0.0.1:8000/<trace_id>
-
-When developing the frontend, you can still run the React/Vite dev server separately:
-
-    # 1) start backend
-    python -m tinytasktree --httpserver --host 127.0.0.1 --port 8000 --trace-dir .traces
-    # 2) start UI dev server
-    cd ui && npm run dev
-    # 3) open the UI
-    http://127.0.0.1:5173/<trace_id>
 
 ### Others
 
@@ -283,7 +265,7 @@ def _resolve_ui_file(ui_root: Any, request_path: str) -> tuple[Any, str] | None:
 type JSON = dict[str, Any]
 
 
-class AsyncKeyValueStore(Protocol):
+class CacheStore(Protocol):
     async def get(self, key: str) -> Any: ...
 
     async def set(self, key: str, value: Any, ex: int | float | timedelta | None = None) -> Any: ...
@@ -518,20 +500,20 @@ class FileTraceStorageHandler:
     def _path_for(self, trace_id: str) -> str:
         return os.path.join(self._dirpath, f"{trace_id}.json")
 
-    def _normalize_trace_name(self, name: str) -> str:
-        stripped = name.strip()
-        matched = re.fullmatch(r"Tree\((.*)\)", stripped)
-        if matched:
-            inner = matched.group(1).strip()
-            return inner or "trace"
-        return stripped or "trace"
-
     def _derive_trace_name(self, trace_root: TraceRoot) -> str:
+        def normalize(name: str) -> str:
+            stripped = name.strip()
+            matched = re.fullmatch(r"Tree\((.*)\)", stripped)
+            if matched:
+                inner = matched.group(1).strip()
+                return inner or "trace"
+            return stripped or "trace"
+
         if trace_root.children:
             first_child = next(iter(trace_root.children.values()))
             if first_child.name:
-                return self._normalize_trace_name(first_child.name)
-        return self._normalize_trace_name(trace_root.name or "trace")
+                return normalize(first_child.name)
+        return normalize(trace_root.name or "trace")
 
     def _slugify_trace_name(self, name: str, max_len: int = 24) -> str:
         normalized = re.sub(r"\s+", "-", name.strip().lower())
@@ -605,11 +587,21 @@ class FileTraceStorageHandler:
                         if isinstance(first_child, dict):
                             first_name = first_child.get("name")
                             if isinstance(first_name, str):
-                                trace_name = self._normalize_trace_name(first_name)
+                                stripped = first_name.strip()
+                                matched = re.fullmatch(r"Tree\((.*)\)", stripped)
+                                if matched:
+                                    trace_name = matched.group(1).strip() or "trace"
+                                else:
+                                    trace_name = stripped or "trace"
                     if not trace_name:
                         root_name = payload.get("name")
                         if isinstance(root_name, str):
-                            trace_name = self._normalize_trace_name(root_name)
+                            stripped = root_name.strip()
+                            matched = re.fullmatch(r"Tree\((.*)\)", stripped)
+                            if matched:
+                                trace_name = matched.group(1).strip() or "trace"
+                            else:
+                                trace_name = stripped or "trace"
             except Exception:
                 trace_name = ""
 
@@ -1312,6 +1304,8 @@ class LLMProvider:
 class LLMModel:
     model: str
     provider: LLMProvider
+    input_price_per_m: float = 0.0
+    output_price_per_m: float = 0.0
     llm_call_kwargs: dict[str, Any] = field(default_factory=dict)
 
 
@@ -1529,10 +1523,31 @@ class LLMNode[B](LeafNode[B]):
         return merged
 
     @staticmethod
-    def _resolve_model_input(model_input: LLMResolvedModel) -> tuple[str, LLMProvider | None, dict[str, Any]]:
+    def _resolve_model_input(model_input: LLMResolvedModel) -> tuple[str, LLMProvider | None, float, float, dict[str, Any]]:
         if isinstance(model_input, LLMModel):
-            return model_input.model, model_input.provider, dict(model_input.llm_call_kwargs)
-        return model_input, None, {}
+            return (
+                model_input.model,
+                model_input.provider,
+                float(model_input.input_price_per_m),
+                float(model_input.output_price_per_m),
+                dict(model_input.llm_call_kwargs),
+            )
+        return model_input, None, 0.0, 0.0, {}
+
+    @staticmethod
+    def _compute_priced_cost(tokens: dict[str, int] | None, input_price_per_m: float, output_price_per_m: float) -> float | None:
+        if not tokens:
+            return None
+        prompt_tokens = tokens.get("prompt")
+        completion_tokens = tokens.get("completion")
+        if prompt_tokens is None and completion_tokens is None:
+            return None
+        cost = 0.0
+        if prompt_tokens is not None:
+            cost += (prompt_tokens / 1_000_000.0) * input_price_per_m
+        if completion_tokens is not None:
+            cost += (completion_tokens / 1_000_000.0) * output_price_per_m
+        return cost
 
     def _resolve_api_key(self, b: B, model: str) -> str | None:
         api_key_source = self._api_key if self._api_key is not None else _DEFAULT_GLOBAL_LLM_API_KEY_FACTORY
@@ -1592,18 +1607,23 @@ class LLMNode[B](LeafNode[B]):
         self,
         *,
         tracer: Tracer,
-        model: str,
+        tokens: dict[str, int] | None = None,
+        input_price_per_m: float = 0.0,
+        output_price_per_m: float = 0.0,
         response: Any | None = None,
         usage: dict[str, Any] | None = None,
         cost_reported: bool = False,
     ) -> bool:
-        del model
         if cost_reported:
             return True
         try:
             response_cost = self._extract_response_cost(response=response, usage=usage)
             if response_cost is not None:
                 tracer.incr_cost(response_cost)
+                return True
+            priced_cost = self._compute_priced_cost(tokens, input_price_per_m, output_price_per_m)
+            if priced_cost is not None and priced_cost > 0:
+                tracer.incr_cost(priced_cost)
                 return True
         except Exception:
             return False
@@ -1652,7 +1672,7 @@ class LLMNode[B](LeafNode[B]):
     async def _impl(self, context: Context, tracer: Tracer) -> Result:
         b = cast(B, context._current_blackboard())
         model_input = self._model(b) if callable(self._model) else self._model
-        model, provider, model_llm_call_kwargs = self._resolve_model_input(model_input)
+        model, provider, input_price_per_m, output_price_per_m, model_llm_call_kwargs = self._resolve_model_input(model_input)
         messages = self._messages(b) if callable(self._messages) else self._messages
         stream = self._stream(b) if callable(self._stream) else self._stream
         merged_llm_call_kwargs = self._merge_llm_call_kwargs(
@@ -1672,6 +1692,8 @@ class LLMNode[B](LeafNode[B]):
         tracer.update_attributes(model=model)
         tracer.update_attributes(messages=messages)
         tracer.update_attributes(stream=stream)
+        tracer.update_attributes(input_price_per_m=input_price_per_m)
+        tracer.update_attributes(output_price_per_m=output_price_per_m)
         tracer.update_attributes(**merged_llm_call_kwargs)
         if api_key is not None:
             tracer.update_attributes(api_key="***")
@@ -1690,18 +1712,22 @@ class LLMNode[B](LeafNode[B]):
             tracer.update_attributes(api_key="***")
         request_kwargs.update({"model": request_model, "messages": messages, "stream": stream})
         client = _new_async_openai_client(**client_kwargs)
+        cost_reported = False
         try:
             response = await client.chat.completions.create(**request_kwargs)
-
-            cost_reported = False
 
             if stream:
                 async for chunk in response:
                     usage = self._obj_get(chunk, "usage")
-                    cost_reported = self._try_record_cost(
-                        tracer=tracer, model=model, usage=usage, cost_reported=cost_reported
-                    )
                     tokens = self._extract_tokens(usage)
+                    cost_reported = self._try_record_cost(
+                        tracer=tracer,
+                        tokens=tokens,
+                        input_price_per_m=input_price_per_m,
+                        output_price_per_m=output_price_per_m,
+                        usage=usage,
+                        cost_reported=cost_reported,
+                    )
                     if tokens is not None:
                         last_tokens = tokens
 
@@ -1727,10 +1753,16 @@ class LLMNode[B](LeafNode[B]):
                         finish_reason = str(fr)
 
                 usage = self._obj_get(response, "usage")
-                cost_reported = self._try_record_cost(
-                    tracer=tracer, model=model, response=response, usage=usage, cost_reported=cost_reported
-                )
                 last_tokens = self._extract_tokens(usage)
+                cost_reported = self._try_record_cost(
+                    tracer=tracer,
+                    tokens=last_tokens,
+                    input_price_per_m=input_price_per_m,
+                    output_price_per_m=output_price_per_m,
+                    response=response,
+                    usage=usage,
+                    cost_reported=cost_reported,
+                )
         finally:
             await _close_openai_client(client)
 
@@ -1738,6 +1770,14 @@ class LLMNode[B](LeafNode[B]):
         tracer.update_attributes(finish_reason=finish_reason)
         if last_tokens is None:
             last_tokens = self._compute_tokens(model, messages, output)
+        if not cost_reported:
+            cost_reported = self._try_record_cost(
+                tracer=tracer,
+                tokens=last_tokens,
+                input_price_per_m=input_price_per_m,
+                output_price_per_m=output_price_per_m,
+                cost_reported=False,
+            )
         if last_tokens is not None:
             tracer.update_attributes(tokens=last_tokens)
             if "prompt" in last_tokens:
@@ -2171,7 +2211,7 @@ class TerminableDecoratorNode[B](CompositeNode[B], DecoratorNode[B]):
     def __init__(
         self,
         key_func: TerminableKeyFunction[B],
-        store: AsyncKeyValueStore | None = None,
+        store: CacheStore | None = None,
         monitor_interval_ms: float = 500,  # ms
         name: str = "",
     ):
@@ -2258,7 +2298,7 @@ class CacherNode[B](SingleChildNode[B], DecoratorNode[B]):
     def __init__(
         self,
         key_func: CacherKeyFunction[B],
-        store: AsyncKeyValueStore | None = None,
+        store: CacheStore | None = None,
         expiration: Cache_Expiration = timedelta(hours=1),
         value_validator: CacherValueValidator[B] | None = None,
         enabled: bool | CacherEnabledFunction[B] = True,
@@ -3079,7 +3119,7 @@ class Tree[B](_ForwardingChildNode[B]):
     def Cacher(
         self,
         key_func: CacherKeyFunction[B],
-        store: AsyncKeyValueStore | None = None,
+        store: CacheStore | None = None,
         expiration: Cache_Expiration = timedelta(hours=1),
         value_validator: CacherValueValidator[B] | None = None,
         enabled: bool | CacherEnabledFunction[B] = True,
@@ -3092,7 +3132,7 @@ class Tree[B](_ForwardingChildNode[B]):
           Otherwise, executes the child and stores its result if it returns `OK`.
 
         :param key_func: Factory function `f(blackboard) -> str` to generate the cache key.
-        :param store: An asynchronous key-value store instance implementing `AsyncKeyValueStore`.
+        :param store: An asynchronous key-value store instance implementing `CacheStore`.
         :param expiration: Cache TTL. Supports:
             - `int` or `float`: Seconds.
             - `timedelta`: Fixed duration.
@@ -3129,7 +3169,7 @@ class Tree[B](_ForwardingChildNode[B]):
     def Terminable(
         self,
         key_func: TerminableKeyFunction[B],
-        store: AsyncKeyValueStore | None = None,
+        store: CacheStore | None = None,
         monitor_interval_ms: float = 500,  # ms
         name: str = "",
     ) -> Self:
@@ -3147,7 +3187,7 @@ class Tree[B](_ForwardingChildNode[B]):
         5. Note: The monitored signal key is automatically deleted when the node starts and when a signal is detected.
 
         :param key_func: Factory function `f(blackboard) -> str` to generate the termination signal key.
-        :param store: An asynchronous key-value store instance implementing `AsyncKeyValueStore`.
+        :param store: An asynchronous key-value store instance implementing `CacheStore`.
         :param monitor_interval_ms: Polling interval in milliseconds to check for the signal key.
         :param name: Optional node name.
 

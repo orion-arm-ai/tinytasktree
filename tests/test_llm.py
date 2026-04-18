@@ -194,6 +194,8 @@ async def test_llm_model_provider_supplies_transport_and_kwargs(mock_openai):
     model = tinytasktree.LLMModel(
         "provider/model",
         provider=provider,
+        input_price_per_m=0.5,
+        output_price_per_m=1.5,
         llm_call_kwargs={"temperature": 0.25},
     )
 
@@ -223,6 +225,8 @@ async def test_llm_model_provider_supplies_transport_and_kwargs(mock_openai):
     assert trace.attributes["api_key"] == "***"
     assert trace.attributes["reasoning"] == {"enabled": False}
     assert trace.attributes["temperature"] == 0.25
+    assert trace.attributes["input_price_per_m"] == 0.5
+    assert trace.attributes["output_price_per_m"] == 1.5
 
 
 async def test_llm_node_kwargs_override_model_and_provider_defaults(mock_openai):
@@ -363,3 +367,41 @@ async def test_llm_reasoning_is_forwarded_via_extra_body(mock_openai):
     assert result.is_ok()
     assert "reasoning" not in recorded
     assert recorded["extra_body"] == {"reasoning": {"enabled": False}}
+
+
+async def test_llm_cost_falls_back_to_model_token_pricing(mock_openai):
+    async def handler(**kwargs):
+        return {
+            "choices": [{"message": {"content": "priced"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 2000, "completion_tokens": 500, "total_tokens": 2500},
+        }
+
+    mock_openai(handler=handler)
+
+    provider = tinytasktree.LLMProvider(base_url="https://provider.example/v1")
+    model = tinytasktree.LLMModel(
+        "provider/priced-model",
+        provider=provider,
+        input_price_per_m=1.25,
+        output_price_per_m=5.0,
+    )
+
+    # fmt: off
+    tree = (
+        tinytasktree.Tree[Blackboard]("LLMPricedCost")
+        .Sequence()
+        ._().LLM(model, make_messages)
+        .End()
+    )
+    # fmt: on
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="hi")
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert result.is_ok()
+
+    trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
+    expected = (2000 / 1_000_000) * 1.25 + (500 / 1_000_000) * 5.0
+    assert trace.cost == pytest.approx(expected)
