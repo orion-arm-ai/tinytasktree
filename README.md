@@ -869,7 +869,6 @@ tree = (
 - `TraceRoot` / `TraceNode`: structured trace tree
 - `TraceStorageHandler` / `FileTraceStorageHandler`: save and load traces
 - `register_global_hook_after_spawned_task_finish(hook)`: hook for Parallel/Gather/Terminable tasks
-- `set_default_llm_api_key_factory(factory_or_key)`: default LLM API key or factory
 - `run_httpserver(host, port, trace_dir)` / `create_http_app(...)`: built-in HTTP trace server
 
 ## Contributing <span id="contributing"></span>
