@@ -1863,7 +1863,7 @@ function TraceUI() {
                                                     ? "Loading..."
                                                     : traceList.length
                                                       ? `${traceList.length} trace${traceList.length > 1 ? "s" : ""}`
-                                                      : "No traces found in the current trace directory."}
+                                                      : "No traces found in the current trace directory. Showing up to the most recent 100 traces."}
                                             </Text>
                                         </div>
                                         <Button size="small" onClick={() => void loadTraceList()} loading={traceListLoading}>

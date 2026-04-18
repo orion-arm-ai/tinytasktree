@@ -78,5 +78,8 @@ async def test_file_trace_storage_handler_generates_sortable_trace_ids_and_lists
 
         traces = await handler.list_traces()
         assert [trace["id"] for trace in traces[:2]] == [trace_id_b, trace_id_a]
-        assert traces[0]["name"] == "Beta Demo Tree"
+        assert traces[0]["name"] == f"{trace_id_b}.json"
         assert isinstance(traces[0]["created_at"], str)
+
+        limited_traces = await handler.list_traces(limit=1)
+        assert [trace["id"] for trace in limited_traces] == [trace_id_b]
