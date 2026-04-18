@@ -27,7 +27,7 @@ tree = (
 
 ```python
 from dataclasses import dataclass
-from tinytasktree import Tree, JSON, Context
+from tinytasktree import Context, JSON, LLMModel, LLMProvider, Tree
 
 @dataclass
 class Blackboard:
@@ -39,10 +39,13 @@ def make_messages(b: Blackboard) -> list[JSON]:
     return [{"role": "user", "content": b.prompt}]
 
 
+provider = LLMProvider(base_url="https://llm.example/v1", api_key="...")
+model = LLMModel("gpt-4.1-mini", provider=provider)
+
 tree = (
     Tree[Blackboard]("HelloWorld")
     .Sequence()
-    ._().LLM("gpt-4.1-mini", make_messages)
+    ._().LLM(model, make_messages)
     ._().WriteBlackboard("response")
     .End()
 )
@@ -93,12 +96,6 @@ pip install tinytasktree
 
 ## UI Trace Server
 
-There are two ways to use the UI:
-
-1. If you install a built Python package or wheel that bundles the UI, `python -m tinytasktree --httpserver ...`
-   serves the UI directly from the Python package.
-2. When developing the frontend, run the React dev server from `ui/`.
-
 Save traces into the same directory that the backend serves, for example:
 
 ```python
@@ -117,26 +114,8 @@ print("Trace URL:", f"http://127.0.0.1:8000/{trace_id}")
 Then start the backend and UI:
 
 ```bash
-# option A: packaged UI served directly by the Python httpserver
 python -m tinytasktree --httpserver --host 127.0.0.1 --port 8000 --trace-dir .traces
-# open http://127.0.0.1:8000/<trace_id>
-
-# option B: frontend development with the Vite dev server
-# 0) from the repo root, install UI deps once
-(cd ui && npm install)
-
-# 1) start backend from the repo root
-python -m tinytasktree --httpserver --host 127.0.0.1 --port 8000 --trace-dir .traces
-
-# 2) in another terminal, start the UI dev server
-(cd ui && npm run dev)
-
-# 3) open the trace in the dev UI
-# http://127.0.0.1:5173/<trace_id>
-
-# optional: for `npm run preview` or a static `ui/dist` deploy,
-# set the backend origin explicitly at build time
-VITE_API_BASE_URL=http://127.0.0.1:8000 npm run build
+# Visit http://127.0.0.1:8000/<trace-id>
 ```
 
 Notes:
@@ -437,10 +416,13 @@ Usage:
 - Tracer records tokens when the provider returns usage, and cost when response metadata exposes it
 
 ```python
+provider = LLMProvider(base_url="https://llm.example/v1", api_key="...")
+model = LLMModel("gpt-4.1-mini", provider=provider)
+
 tree = (
     Tree()
     .Sequence()
-    ._().LLM("gpt-4.1-mini", [{"role": "user", "content": "hi"}])
+    ._().LLM(model, [{"role": "user", "content": "hi"}])
     .End()
 )
 ```
@@ -450,6 +432,7 @@ Streaming response example:
 ```python
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY")
+provider = LLMProvider(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
 
 def on_delta(b, full, delta, done, reason=""):
     if delta:
@@ -459,12 +442,10 @@ tree = (
     Tree()
     .Sequence()
     ._().LLM(
-        lambda b: b.model,
+        lambda b: LLMModel(b.model, provider=provider),
         lambda b: b.messages,
         stream=True,
         stream_on_delta=on_delta,
-        base_url=lambda b: b.base_url or LLM_BASE_URL,
-        api_key=LLM_API_KEY,
     )
     .End()
 )
@@ -511,15 +492,20 @@ tree = (
 Selector is the typical choice for the fallback chain pattern:
 
 ```python
+provider = LLMProvider(base_url="https://llm.example/v1", api_key="...")
+model1 = LLMModel("model1", provider=provider)
+model2 = LLMModel("model2", provider=provider)
+model3 = LLMModel("model3", provider=provider)
+
 tree = (
     Tree()
     .Selector()
     ._().Timeout(20)
-    ._()._().LLM("model1", llm_message)
+    ._()._().LLM(model1, llm_message)
     ._().Timeout(20)
-    ._()._().LLM("model2", llm_message)
+    ._()._().LLM(model2, llm_message)
     ._().Timeout(20)
-    ._()._().LLM("model3", llm_message)
+    ._()._().LLM(model3, llm_message)
     .End()
 )
 ```

@@ -14,13 +14,15 @@ import redis.asyncio as async_redis
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # ensure tinytasktree is importable
 
-from tinytasktree import JSON, Context, FileTraceStorageHandler, Tree
+from tinytasktree import JSON, Context, FileTraceStorageHandler, LLMModel, LLMProvider, Tree
 
 # Requirements:
 #   - LLM_BASE_URL and LLM_API_KEY set for your LLM service
 #   - redis-py installed and Redis running, with REDIS_URL set (default: redis://127.0.0.1:6379)
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY")
+PROVIDER = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
+MODEL = LLMModel("qwen/qwen3.6-plus", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
 
 PROMPT_VERSION = "v1"
 
@@ -50,7 +52,7 @@ tree = (
     Tree[Blackboard]("CacherValidator")
     .Cacher(key_func=cache_key, store=store, expiration=60, value_validator=cache_validator)
     ._().Sequence()
-    ._()._().LLM("qwen/qwen3.6-plus", make_messages, base_url=LLM_BASE_URL, api_key=LLM_API_KEY, reasoning={"enabled": False})
+    ._()._().LLM(MODEL, make_messages)
     ._()._().WriteBlackboard("response")
     .End()
 )

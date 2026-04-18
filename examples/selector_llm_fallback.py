@@ -11,12 +11,15 @@ from dataclasses import dataclass
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # ensure tinytasktree is importable
 
-from tinytasktree import JSON, Context, FileTraceStorageHandler, Tree
+from tinytasktree import JSON, Context, FileTraceStorageHandler, LLMModel, LLMProvider, Tree
 
 # Requirements:
 #   - LLM_BASE_URL and LLM_API_KEY set for your LLM service
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY")
+PROVIDER = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
+PRIMARY_MODEL = LLMModel("qwen/qwen3.5-35b-a3b", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
+FALLBACK_MODEL = LLMModel("qwen/qwen3.5-35b-a3b", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
 
 
 @dataclass
@@ -43,9 +46,9 @@ tree = (
     .Sequence()
     ._().Selector()
     ._()._().Timeout(3) # First attemp
-    ._()._()._().LLM("qwen/qwen3.5-35b-a3b", make_messages, stream=True, stream_on_delta=on_delta, name="FirstAttempLLM", base_url=LLM_BASE_URL, api_key=LLM_API_KEY, reasoning={"enabled": False})
+    ._()._()._().LLM(PRIMARY_MODEL, make_messages, stream=True, stream_on_delta=on_delta, name="FirstAttempLLM")
     ._()._()._().WriteBlackboard(write_response)
-    ._()._().LLM("qwen/qwen3.5-35b-a3b", make_messages, stream=True, stream_on_delta=on_delta, name="FallbackLLM", base_url=LLM_BASE_URL, api_key=LLM_API_KEY, reasoning={"enabled": False})
+    ._()._().LLM(FALLBACK_MODEL, make_messages, stream=True, stream_on_delta=on_delta, name="FallbackLLM")
     ._().WriteBlackboard(write_response)
     .End()
 )

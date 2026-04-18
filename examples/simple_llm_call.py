@@ -12,11 +12,13 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # e
 import asyncio
 from dataclasses import dataclass
 
-from tinytasktree import JSON, Context, FileTraceStorageHandler, Tree
+from tinytasktree import JSON, Context, FileTraceStorageHandler, LLMModel, LLMProvider, Tree
 
 # Running this example requires setting `LLM_BASE_URL` and `LLM_API_KEY`.
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY")
+PROVIDER = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
+MODEL = LLMModel("qwen/qwen-plus", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
 
 
 @dataclass
@@ -41,15 +43,7 @@ def on_delta(b: Blackboard, fulltext: str, delta: str, finished: bool) -> None:
 tree = (
     Tree[Blackboard]("HelloWorld")
     .Sequence()
-    ._().LLM(
-        "qwen/qwen-plus",
-        make_messages,
-        stream=True,
-        stream_on_delta=on_delta,
-        base_url=LLM_BASE_URL,
-        api_key=LLM_API_KEY,
-        reasoning={"enabled": False},
-    )
+    ._().LLM(MODEL, make_messages, stream=True, stream_on_delta=on_delta)
     ._().WriteBlackboard(write_response)
     .End()
 )

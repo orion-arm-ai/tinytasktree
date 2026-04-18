@@ -24,17 +24,13 @@ Example::
     LLM_BASE_URL = os.getenv("LLM_BASE_URL")
     LLM_API_KEY = os.getenv("LLM_API_KEY")
 
+    provider = LLMProvider(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
+    model = LLMModel("google/gemma-3-27b-it:free", provider=provider)
+
     tree = (
         Tree[Blackboard]("HelloWorld")
         .Sequence()
-        ._().LLM(
-            "google/gemma-3-27b-it:free",
-            make_messages,
-            stream=True,
-            stream_on_delta=on_delta,
-            base_url=LLM_BASE_URL,
-            api_key=LLM_API_KEY,
-        )
+        ._().LLM(model, make_messages, stream=True, stream_on_delta=on_delta)
         ._().WriteBlackboard(write_response)
         .End()
     )
@@ -195,6 +191,8 @@ __all__ = (
     "B",
     "Context",
     "JSON",
+    "LLMModel",
+    "LLMProvider",
     "JSONLoader",
     "Result",
     "Status",
@@ -1210,7 +1208,22 @@ class ParseJSON[B](LeafNode[B]):
         return Result.OK(d)
 
 
-type LLMModelFactory[B] = Callable[[B], str]  # function(blackboard) => model
+@dataclass(frozen=True)
+class LLMProvider:
+    base_url: str
+    api_key: str | None = None
+    llm_call_kwargs: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class LLMModel:
+    model: str
+    provider: LLMProvider
+    llm_call_kwargs: dict[str, Any] = field(default_factory=dict)
+
+
+type LLMResolvedModel = str | LLMModel
+type LLMModelFactory[B] = Callable[[B], LLMResolvedModel]  # function(blackboard) => model
 type LLMMessagesFactory[B] = Callable[[B], list[JSON]]  # function(blackboard) => messages
 type LLMStreamFactory[B] = Callable[[B], bool]  # function(blackboard) => stream (bool)
 type LLMBaseURLFactory[B] = Callable[[B], str | None]  # function(blackboard) => base_url | None
@@ -1414,6 +1427,20 @@ class LLMNode[B](LeafNode[B]):
             return None
         return choices[0]
 
+    @staticmethod
+    def _merge_llm_call_kwargs(*sources: dict[str, Any] | None) -> dict[str, Any]:
+        merged: dict[str, Any] = {}
+        for source in sources:
+            if source:
+                merged.update(source)
+        return merged
+
+    @staticmethod
+    def _resolve_model_input(model_input: LLMResolvedModel) -> tuple[str, LLMProvider | None, dict[str, Any]]:
+        if isinstance(model_input, LLMModel):
+            return model_input.model, model_input.provider, dict(model_input.llm_call_kwargs)
+        return model_input, None, {}
+
     def _resolve_api_key(self, b: B, model: str) -> str | None:
         api_key_source = self._api_key if self._api_key is not None else _DEFAULT_GLOBAL_LLM_API_KEY_FACTORY
         if callable(api_key_source):
@@ -1425,7 +1452,9 @@ class LLMNode[B](LeafNode[B]):
             if params_cnt == 2:
                 return cast(LLMApiKeyFactory2[B], api_key_source)(b, model)
             raise TasktreeProgrammingError(f"{self.fullname}: api_key factory params count invalid")
-        return api_key_source
+        if api_key_source is not None:
+            return api_key_source
+        return None
 
     def _resolve_base_url(self, b: B) -> str | None:
         base_url_source = self._base_url
@@ -1437,7 +1466,7 @@ class LLMNode[B](LeafNode[B]):
 
     def __init__(
         self,
-        model: str | LLMModelFactory[B],
+        model: LLMResolvedModel | LLMModelFactory[B],
         messages: list[JSON] | LLMMessagesFactory[B],
         stream: bool | LLMStreamFactory[B] = False,
         stream_on_delta: LLMStreamOnChunkCallback[B] | None = None,
@@ -1529,18 +1558,28 @@ class LLMNode[B](LeafNode[B]):
     @override
     async def _impl(self, context: Context, tracer: Tracer) -> Result:
         b = cast(B, context._current_blackboard())
-        model = self._model(b) if callable(self._model) else self._model
+        model_input = self._model(b) if callable(self._model) else self._model
+        model, provider, model_llm_call_kwargs = self._resolve_model_input(model_input)
         messages = self._messages(b) if callable(self._messages) else self._messages
         stream = self._stream(b) if callable(self._stream) else self._stream
+        merged_llm_call_kwargs = self._merge_llm_call_kwargs(
+            provider.llm_call_kwargs if provider is not None else None,
+            model_llm_call_kwargs,
+            self._llm_call_kwargs,
+        )
         api_key = self._resolve_api_key(b, model)
+        if api_key is None and provider is not None:
+            api_key = provider.api_key
         base_url = self._resolve_base_url(b)
+        if base_url is None and provider is not None:
+            base_url = provider.base_url
         output = ""
         last_tokens: dict[str, int] | None = None
 
         tracer.update_attributes(model=model)
         tracer.update_attributes(messages=messages)
         tracer.update_attributes(stream=stream)
-        tracer.update_attributes(**self._llm_call_kwargs)
+        tracer.update_attributes(**merged_llm_call_kwargs)
         if api_key is not None:
             tracer.update_attributes(api_key="***")
         if base_url is not None:
@@ -1552,7 +1591,7 @@ class LLMNode[B](LeafNode[B]):
             api_key=api_key,
             base_url=base_url,
             stream=stream,
-            llm_call_kwargs=self._llm_call_kwargs,
+            llm_call_kwargs=merged_llm_call_kwargs,
         )
         if api_key is None and "api_key" in client_kwargs:
             tracer.update_attributes(api_key="***")
@@ -2647,7 +2686,7 @@ class Tree[B](_ForwardingChildNode[B]):
 
     def LLM(
         self,
-        model: str | LLMModelFactory[B],
+        model: LLMResolvedModel | LLMModelFactory[B],
         messages: list[JSON] | LLMMessagesFactory[B],
         stream: bool | LLMStreamFactory[B] = False,
         stream_on_delta: LLMStreamOnChunkCallback[B] | None = None,
@@ -2664,7 +2703,8 @@ class Tree[B](_ForwardingChildNode[B]):
         - Status: Returns `OK` upon successful completion.
         - Data: Returns the final output text: `OK(output_text)`.
 
-        :param model: Model name string or a factory function `f(blackboard) -> str`.
+        :param model: Model name string, `LLMModel`, or a factory function
+            `f(blackboard) -> str | LLMModel`.
         :param messages: A list of message objects or a factory function `f(blackboard) -> list[JSON]`.
         :param stream: Boolean or a factory function `f(blackboard) -> bool` to enable streaming.
         :param stream_on_delta: Optional callback for streaming. Supports sync or async with signatures:
@@ -2689,13 +2729,18 @@ class Tree[B](_ForwardingChildNode[B]):
 
         Example::
 
+            provider = LLMProvider(base_url="https://llm.example/v1", api_key="...")
+            model = LLMModel("openai/gpt-4.1-mini", provider=provider)
+
             Tree()
             .Sequence()
-            ._().LLM("openai/gpt-4.1-mini", [{"role": "user", "content": "Hello!"}], stream=True, stream_on_delta=lambda b, text, delta, finished: print(delta, end=""), base_url=lambda b: b.base_url)
+            ._().LLM(model, [{"role": "user", "content": "Hello!"}], stream=True, stream_on_delta=lambda b, text, delta, finished: print(delta, end=""))
             ._().WriteBlackboard("ai_response")
             .End()
         """
-        return self._attach(LLMNode[B](model, messages, stream, stream_on_delta, api_key, name, base_url, **llm_call_kwargs))
+        return self._attach(
+            LLMNode[B](model, messages, stream, stream_on_delta, api_key, name, base_url, **llm_call_kwargs)
+        )
 
     def Subtree[B1](
         self,
@@ -3214,6 +3259,7 @@ class Tree[B](_ForwardingChildNode[B]):
         Checks out docsting of `If` for more detail.
         """
         return self._attach(ElseNode[B](name))
+
 
 #############
 # Global Hooks

@@ -13,12 +13,14 @@ from typing import AsyncGenerator
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # ensure tinytasktree is importable
 
-from tinytasktree import JSON, Context, FileTraceStorageHandler, Result, Tree
+from tinytasktree import JSON, Context, FileTraceStorageHandler, LLMModel, LLMProvider, Result, Tree
 
 # Requirements:
 #   - LLM_BASE_URL and LLM_API_KEY set for your LLM service
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY")
+PROVIDER = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
+MODEL = LLMModel("qwen/qwen3.6-plus", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
 
 
 @dataclass
@@ -50,7 +52,7 @@ tree = (
     Tree[Blackboard]("WrapperLLM")
     .Sequence()
     ._().Wrapper(around_llm)
-    ._()._().LLM("qwen/qwen3.6-plus", make_messages, base_url=LLM_BASE_URL, api_key=LLM_API_KEY, reasoning={"enabled": False})
+    ._()._().LLM(MODEL, make_messages)
     ._().WriteBlackboard(write_response)
     .End()
 )

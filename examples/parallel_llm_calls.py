@@ -11,12 +11,16 @@ from dataclasses import dataclass
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # ensure tinytasktree is importable
 
-from tinytasktree import JSON, Context, FileTraceStorageHandler, Tree
+from tinytasktree import JSON, Context, FileTraceStorageHandler, LLMModel, LLMProvider, Tree
 
 # Requirements:
 #   - LLM_BASE_URL and LLM_API_KEY set for your LLM service
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY")
+PROVIDER = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
+MODEL_1 = LLMModel("qwen/qwen3.6-plus", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
+MODEL_2 = LLMModel("qwen/qwen3.5-35b-a3b", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
+MODEL_3 = LLMModel("qwen/qwen3.5-27b", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
 
 
 @dataclass
@@ -60,13 +64,13 @@ tree = (
     Tree[Blackboard]("ParallelLLM")
     .Parallel(concurrency_limit=3)
     ._().Sequence()
-    ._()._().LLM("qwen/qwen3.6-plus", make_messages_1, base_url=LLM_BASE_URL, api_key=LLM_API_KEY, reasoning={"enabled": False})
+    ._()._().LLM(MODEL_1, make_messages_1)
     ._()._().WriteBlackboard(write_response_1)
     ._().Sequence()
-    ._()._().LLM("qwen/qwen3.5-35b-a3b", make_messages_2, base_url=LLM_BASE_URL, api_key=LLM_API_KEY, reasoning={"enabled": False})
+    ._()._().LLM(MODEL_2, make_messages_2)
     ._()._().WriteBlackboard(write_response_2)
     ._().Sequence()
-    ._()._().LLM("qwen/qwen3.5-27b", make_messages_3, base_url=LLM_BASE_URL, api_key=LLM_API_KEY, reasoning={"enabled": False})
+    ._()._().LLM(MODEL_3, make_messages_3)
     ._()._().WriteBlackboard(write_response_3)
     .End()
 )

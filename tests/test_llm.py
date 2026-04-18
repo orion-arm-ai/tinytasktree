@@ -173,6 +173,119 @@ async def test_llm_base_url_factory_keeps_model_independent(mock_openai):
     assert trace.attributes["base_url"] == "https://llm.example/v1"
 
 
+async def test_llm_model_provider_supplies_transport_and_kwargs(mock_openai):
+    recorded = {}
+
+    async def handler(**kwargs):
+        recorded.update(kwargs)
+        return {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "_hidden_params": {"response_cost": 0.0},
+        }
+
+    mock_openai(handler=handler)
+
+    provider = tinytasktree.LLMProvider(
+        base_url="https://provider.example/v1",
+        api_key="provider-key",
+        llm_call_kwargs={"reasoning": {"enabled": False}},
+    )
+    model = tinytasktree.LLMModel(
+        "provider/model",
+        provider=provider,
+        llm_call_kwargs={"temperature": 0.25},
+    )
+
+    # fmt: off
+    tree = (
+        tinytasktree.Tree[Blackboard]("LLMModelProvider")
+        .Sequence()
+        ._().LLM(model, make_messages)
+        .End()
+    )
+    # fmt: on
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="hi")
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert result.is_ok()
+    assert recorded["model"] == "provider/model"
+    assert recorded["client_kwargs"].get("base_url") == "https://provider.example/v1"
+    assert recorded["client_kwargs"].get("api_key") == "provider-key"
+    assert recorded["extra_body"] == {"reasoning": {"enabled": False}}
+    assert recorded["temperature"] == 0.25
+
+    trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
+    assert trace.attributes["base_url"] == "https://provider.example/v1"
+    assert trace.attributes["api_key"] == "***"
+    assert trace.attributes["reasoning"] == {"enabled": False}
+    assert trace.attributes["temperature"] == 0.25
+
+
+async def test_llm_node_kwargs_override_model_and_provider_defaults(mock_openai):
+    recorded = {}
+
+    async def handler(**kwargs):
+        recorded.update(kwargs)
+        return {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "_hidden_params": {"response_cost": 0.0},
+        }
+
+    mock_openai(handler=handler)
+
+    provider = tinytasktree.LLMProvider(
+        base_url="https://provider.example/v1",
+        api_key="provider-key",
+        llm_call_kwargs={"reasoning": {"enabled": True}, "temperature": 0.1},
+    )
+    model = tinytasktree.LLMModel(
+        "provider/model",
+        provider=provider,
+        llm_call_kwargs={"temperature": 0.2, "max_tokens": 64},
+    )
+
+    # fmt: off
+    tree = (
+        tinytasktree.Tree[Blackboard]("LLMOverride")
+        .Sequence()
+        ._().LLM(
+            model,
+            make_messages,
+            api_key="node-key",
+            base_url=lambda b: b.base_url,
+            reasoning={"enabled": False},
+            temperature=0.3,
+        )
+        .End()
+    )
+    # fmt: on
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="hi", base_url="https://node.example/v1")
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert result.is_ok()
+    assert recorded["model"] == "provider/model"
+    assert recorded["client_kwargs"].get("api_key") == "node-key"
+    assert recorded["client_kwargs"].get("base_url") == "https://node.example/v1"
+    assert recorded["extra_body"] == {"reasoning": {"enabled": False}}
+    assert recorded["temperature"] == 0.3
+    assert recorded["max_tokens"] == 64
+
+    trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
+    assert trace.attributes["base_url"] == "https://node.example/v1"
+    assert trace.attributes["api_key"] == "***"
+    assert trace.attributes["reasoning"] == {"enabled": False}
+    assert trace.attributes["temperature"] == 0.3
+    assert trace.attributes["max_tokens"] == 64
+
+
 async def test_llm_streaming_tokens(mock_openai):
     async def handler(**kwargs):
         assert kwargs.get("stream") is True

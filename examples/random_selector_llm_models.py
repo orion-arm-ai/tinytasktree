@@ -9,12 +9,16 @@ import sys
 from dataclasses import dataclass
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # ensure tinytasktree is importable
-from tinytasktree import JSON, Context, FileTraceStorageHandler, Tree
+from tinytasktree import JSON, Context, FileTraceStorageHandler, LLMModel, LLMProvider, Tree
 
 # Requirements:
 #   - LLM_BASE_URL and LLM_API_KEY set for your LLM service
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY")
+PROVIDER = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
+MODEL_A = LLMModel("qwen/qwen3.5-35b-a3b", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
+MODEL_B = LLMModel("qwen/qwen3.5-35b-a3b", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
+MODEL_C = LLMModel("qwen/qwen3.5-35b-a3b", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
 
 
 @dataclass
@@ -40,9 +44,9 @@ tree = (
     Tree[Blackboard]("RandomSelectorLLM")
     .Sequence()
     ._().RandomSelector(weights=[0.4, 0.4, 0.2]) # sets weights=None for equal probability
-    ._()._().LLM("qwen/qwen3.5-35b-a3b", make_messages, stream=True, stream_on_delta=on_delta, name="ModelA", base_url=LLM_BASE_URL, api_key=LLM_API_KEY, reasoning={"enabled": False})
-    ._()._().LLM("qwen/qwen3.5-35b-a3b", make_messages, stream=True, stream_on_delta=on_delta, name="ModelB", base_url=LLM_BASE_URL, api_key=LLM_API_KEY, reasoning={"enabled": False})
-    ._()._().LLM("qwen/qwen3.5-35b-a3b", make_messages, stream=True, stream_on_delta=on_delta, name="ModelC", base_url=LLM_BASE_URL, api_key=LLM_API_KEY, reasoning={"enabled": False})
+    ._()._().LLM(MODEL_A, make_messages, stream=True, stream_on_delta=on_delta, name="ModelA")
+    ._()._().LLM(MODEL_B, make_messages, stream=True, stream_on_delta=on_delta, name="ModelB")
+    ._()._().LLM(MODEL_C, make_messages, stream=True, stream_on_delta=on_delta, name="ModelC")
     ._().WriteBlackboard(write_response)
     .End()
 )

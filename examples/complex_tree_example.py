@@ -12,12 +12,20 @@ from dataclasses import dataclass
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # ensure tinytasktree is importable
 
-from tinytasktree import JSON, Context, FileTraceStorageHandler, Result, Tree
+from tinytasktree import JSON, Context, FileTraceStorageHandler, LLMModel, LLMProvider, Result, Tree
 
 # Requirements:
 #   - LLM_BASE_URL and LLM_API_KEY set for your LLM service
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY")
+PROVIDER = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
+
+# fmt: off
+MODEL_1 = LLMModel("qwen/qwen3.6-plus", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
+MODEL_2 = LLMModel("qwen/qwen3.5-35b-a3b", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
+MODEL_3 = LLMModel("qwen/qwen3.5-27b", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
+MODEL_4 = LLMModel("qwen/qwen3.5-flash-02-23", provider=PROVIDER, llm_call_kwargs={"reasoning": {"enabled": False}})
+# fmt: on
 
 
 @dataclass
@@ -81,7 +89,7 @@ summary_tree = (
     Tree[Blackboard]("SummaryTree")
     .Sequence()
     ._().Log("Summary branch")
-    ._().LLM("qwen/qwen3.6-plus", make_summary_messages, base_url=LLM_BASE_URL, api_key=LLM_API_KEY, reasoning={"enabled": False})
+    ._().LLM(MODEL_1, make_summary_messages)
     ._().WriteBlackboard("summary")
     ._().Log(lambda b: f"Summary length: {len(b.summary)}")
     .End()
@@ -103,7 +111,7 @@ guess_tree = (
     Tree[Blackboard]("GuessTree")
     .Retry(3, sleep_secs=1)
     ._().Sequence()
-    ._()._().LLM("qwen/qwen3.6-plus", make_guess_messages, base_url=LLM_BASE_URL, api_key=LLM_API_KEY, reasoning={"enabled": False})
+    ._()._().LLM(MODEL_1, make_guess_messages)
     ._()._().ParseJSON(dst="guess_json")
     ._()._().Function(validate_guess)
     .End()
@@ -112,7 +120,7 @@ guess_tree = (
 title_tree_a = (
     Tree[Blackboard]("TitleA")
     .Sequence()
-    ._().LLM("qwen/qwen3.5-35b-a3b", make_title_messages, base_url=LLM_BASE_URL, api_key=LLM_API_KEY, reasoning={"enabled": False})
+    ._().LLM(MODEL_2, make_title_messages)
     ._().WriteBlackboard("title")
     .End()
 )
@@ -120,7 +128,7 @@ title_tree_a = (
 title_tree_b = (
     Tree[Blackboard]("TitleB")
     .Sequence()
-    ._().LLM("qwen/qwen3.5-27b", make_title_messages, base_url=LLM_BASE_URL, api_key=LLM_API_KEY, reasoning={"enabled": False})
+    ._().LLM(MODEL_3, make_title_messages)
     ._().WriteBlackboard("title")
     .End()
 )
@@ -128,7 +136,7 @@ title_tree_b = (
 title_tree_c = (
     Tree[Blackboard]("TitleC")
     .Sequence()
-    ._().LLM("qwen/qwen3.5-flash-02-23", make_title_messages, base_url=LLM_BASE_URL, api_key=LLM_API_KEY, reasoning={"enabled": False})
+    ._().LLM(MODEL_4, make_title_messages)
     ._().WriteBlackboard("title")
     .End()
 )
