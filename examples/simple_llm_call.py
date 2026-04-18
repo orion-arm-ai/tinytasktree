@@ -42,7 +42,7 @@ tree = (
     Tree[Blackboard]("HelloWorld")
     .Sequence()
     ._().LLM(
-        "gemma-4-E4B-it-Q4_K_M.gguf",
+        "qwen/qwen-plus",
         make_messages,
         stream=True,
         stream_on_delta=on_delta,
