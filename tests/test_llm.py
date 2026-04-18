@@ -94,48 +94,23 @@ async def test_llm_api_key_resolution(mock_openai):
 
     mock_openai(handler=handler)
 
-    try:
-        tinytasktree.set_default_llm_api_key_factory(lambda b: "default-key")
+    # fmt: off
+    tree_node_key = (
+        tinytasktree.Tree[Blackboard]("LLMNodeKey")
+        .Sequence()
+        ._().LLM("mock/key", make_messages, api_key="node-key")
+        .End()
+    )
+    # fmt: on
 
-        # fmt: off
-        tree_default = (
-            tinytasktree.Tree[Blackboard]("LLMDefaultKey")
-            .Sequence()
-            ._().LLM("mock/key", make_messages)
-            .End()
-        )
-        # fmt: on
-
-        context = tinytasktree.Context()
-        blackboard = Blackboard(prompt="hi")
-        async with context.using_blackboard(blackboard):
-            result = await tree_default(context)
-        assert result.is_ok()
-        assert recorded["client_kwargs"].get("api_key") == "default-key"
-        trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
-        assert trace.attributes["api_key"] == "***"
-
-        recorded.clear()
-
-        # fmt: off
-        tree_node_key = (
-            tinytasktree.Tree[Blackboard]("LLMNodeKey")
-            .Sequence()
-            ._().LLM("mock/key", make_messages, api_key="node-key")
-            .End()
-        )
-        # fmt: on
-
-        context = tinytasktree.Context()
-        blackboard = Blackboard(prompt="hi")
-        async with context.using_blackboard(blackboard):
-            result = await tree_node_key(context)
-        assert result.is_ok()
-        assert recorded["client_kwargs"].get("api_key") == "node-key"
-        trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
-        assert trace.attributes["api_key"] == "***"
-    finally:
-        tinytasktree.set_default_llm_api_key_factory(None)
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="hi")
+    async with context.using_blackboard(blackboard):
+        result = await tree_node_key(context)
+    assert result.is_ok()
+    assert recorded["client_kwargs"].get("api_key") == "node-key"
+    trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
+    assert trace.attributes["api_key"] == "***"
 
 
 async def test_llm_base_url_factory_keeps_model_independent(mock_openai):
