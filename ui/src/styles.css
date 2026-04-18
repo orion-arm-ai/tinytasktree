@@ -995,6 +995,36 @@ body {
   padding: 12px;
 }
 
+.playground-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.playground-stat {
+  background: rgba(6, 12, 26, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.playground-stat-label {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.playground-stat strong {
+  font-size: 14px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
 .playground-output pre {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 13px;
@@ -1132,6 +1162,10 @@ body {
 
   .top-bar {
     flex-wrap: wrap;
+  }
+
+  .playground-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
