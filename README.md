@@ -443,12 +443,8 @@ def on_delta(b, full, delta, done, reason=""):
 tree = (
     Tree()
     .Sequence()
-    ._().LLM(
-        lambda b: LLMModel(b.model, provider=provider),
-        lambda b: b.messages,
-        stream=True,
-        stream_on_delta=on_delta,
-    )
+    ._().LLM(lambda b: LLMModel(b.model, provider=provider), lambda b: b.messages,
+             stream=True, stream_on_delta=on_delta)
     .End()
 )
 ```
