@@ -14,9 +14,9 @@ from dataclasses import dataclass
 
 from tinytasktree import JSON, Context, FileTraceStorageHandler, Tree
 
-# Running this example requires setting `OPENROUTER_BASE_URL` and `OPENROUTER_API_KEY`.
-OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+# Running this example requires setting `LLM_BASE_URL` and `LLM_API_KEY`.
+LLM_BASE_URL = os.getenv("LLM_BASE_URL")
+LLM_API_KEY = os.getenv("LLM_API_KEY")
 
 
 @dataclass
@@ -42,12 +42,13 @@ tree = (
     Tree[Blackboard]("HelloWorld")
     .Sequence()
     ._().LLM(
-        "google/gemini-2.5-flash-lite",
+        "qwen/qwen3.6-plus",
         make_messages,
         stream=True,
         stream_on_delta=on_delta,
-        base_url=OPENROUTER_BASE_URL,
-        api_key=OPENROUTER_API_KEY,
+        base_url=LLM_BASE_URL,
+        api_key=LLM_API_KEY,
+        reasoning={"enabled": False},
     )
     ._().WriteBlackboard(write_response)
     .End()

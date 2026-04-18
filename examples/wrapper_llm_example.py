@@ -16,9 +16,9 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # e
 from tinytasktree import JSON, Context, FileTraceStorageHandler, Result, Tree
 
 # Requirements:
-#   - OPENROUTER_BASE_URL and OPENROUTER_API_KEY set for OpenRouter access
-OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+#   - LLM_BASE_URL and LLM_API_KEY set for OpenRouter access
+LLM_BASE_URL = os.getenv("LLM_BASE_URL")
+LLM_API_KEY = os.getenv("LLM_API_KEY")
 
 
 @dataclass
@@ -50,7 +50,7 @@ tree = (
     Tree[Blackboard]("WrapperLLM")
     .Sequence()
     ._().Wrapper(around_llm)
-    ._()._().LLM("openai/gpt-4.1-mini", make_messages, base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
+    ._()._().LLM("qwen/qwen3.6-plus", make_messages, base_url=LLM_BASE_URL, api_key=LLM_API_KEY, reasoning={"enabled": False})
     ._().WriteBlackboard(write_response)
     .End()
 )

@@ -99,6 +99,41 @@ def test_httpserver_llm_non_stream(mock_openai, tmp_path):
         thread.join()
 
 
+def test_httpserver_llm_passes_reasoning_kwargs(mock_openai, tmp_path):
+    recorded = {}
+
+    async def handler(**kwargs):
+        recorded.update(kwargs)
+        return {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "_hidden_params": {"response_cost": 0.0},
+        }
+
+    mock_openai(handler=handler)
+
+    server, thread = _serve(str(tmp_path))
+    try:
+        body = json.dumps(
+            {
+                "model": "qwen/qwen3.6-plus",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": False,
+                "reasoning": {"enabled": False},
+            }
+        ).encode()
+        resp = _request(server, "POST", "/llm", body=body)
+        data = json.loads(resp.read().decode())
+        assert resp.status == 200
+        assert data == {"output": "ok"}
+        assert "reasoning" not in recorded
+        assert recorded["extra_body"] == {"reasoning": {"enabled": False}}
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 def test_httpserver_llm_stream(mock_openai, tmp_path):
     async def handler(**kwargs):
         assert kwargs["stream"] is True

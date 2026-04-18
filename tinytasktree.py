@@ -21,8 +21,8 @@ Example::
     def on_delta(b: Blackboard, fulltext: str, delta: str, finished: bool) -> None:
         print(delta, end="")
 
-    OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL")
-    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+    LLM_BASE_URL = os.getenv("LLM_BASE_URL")
+    LLM_API_KEY = os.getenv("LLM_API_KEY")
 
     tree = (
         Tree[Blackboard]("HelloWorld")
@@ -32,8 +32,8 @@ Example::
             make_messages,
             stream=True,
             stream_on_delta=on_delta,
-            base_url=OPENROUTER_BASE_URL,
-            api_key=OPENROUTER_API_KEY,
+            base_url=LLM_BASE_URL,
+            api_key=LLM_API_KEY,
         )
         ._().WriteBlackboard(write_response)
         .End()
@@ -1136,6 +1136,11 @@ _OPENAI_CLIENT_OPTION_KEYS = frozenset(
         "websocket_base_url",
     }
 )
+_OPENAI_EXTRA_BODY_KEYS = frozenset(
+    {
+        "reasoning",
+    }
+)
 
 _DEFAULT_GLOBAL_LLM_API_KEY_FACTORY: str | LLMApiKeyFactory[Any] | None = None
 _DEFAULT_GLOBAL_LLM_API_KEY_PARAMS_CNT: int = 0
@@ -1275,12 +1280,26 @@ class LLMNode[B](LeafNode[B]):
     ) -> tuple[dict[str, Any], dict[str, Any], str]:
         client_kwargs: dict[str, Any] = {}
         request_kwargs: dict[str, Any] = {}
+        extra_body: dict[str, Any] = {}
 
         for key, value in llm_call_kwargs.items():
             if key in _OPENAI_CLIENT_OPTION_KEYS:
                 client_kwargs[key] = value
+            elif key == "extra_body" and isinstance(value, dict):
+                extra_body.update(value)
+            elif key in _OPENAI_EXTRA_BODY_KEYS:
+                extra_body[key] = value
             else:
                 request_kwargs[key] = value
+
+        if extra_body:
+            existing_extra_body = request_kwargs.get("extra_body")
+            if isinstance(existing_extra_body, dict):
+                merged_extra_body = dict(existing_extra_body)
+                merged_extra_body.update(extra_body)
+                request_kwargs["extra_body"] = merged_extra_body
+            else:
+                request_kwargs["extra_body"] = extra_body
 
         if base_url is not None:
             client_kwargs["base_url"] = base_url
@@ -3330,33 +3349,38 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
         if b.stream_on_delta is not None:
             b.stream_on_delta(b, fulltext, delta, finished)
 
-    # fmt: off
-    llm_tree = (
-        Tree[LLMBlackboard]("LLMHttp")
-        .Sequence()
-        ._().LLM(lambda b: b.model, lambda b: b.messages, stream=False, api_key=lambda b: b.api_key)
-        ._().WriteBlackboard("output")
-        .End()
-    )
-    stream_llm_tree = (
-        Tree[LLMBlackboard]("LLMHttp")
-        .Sequence()
-        ._().LLM(lambda b: b.model, lambda b: b.messages, stream=True, stream_on_delta=_bb_stream_on_delta, api_key=lambda b: b.api_key)
-        ._().WriteBlackboard("output")
-        .End()
-    )
-    # fmt: on
-
     @dataclass
     class LLMRequest:
         model: str
         messages: list[JSON]
         stream: bool = False
         api_key: str | None = None
+        llm_call_kwargs: JSON = field(default_factory=dict)
+
+    def _make_llm_tree(stream: bool, llm_call_kwargs: JSON) -> Tree["LLMBlackboard"]:
+        # Build per request so extra OpenAI-compatible kwargs such as `reasoning`
+        # can be forwarded without constraining the HTTP schema.
+        # fmt: off
+        return (
+            Tree[LLMBlackboard]("LLMHttp")
+            .Sequence()
+            ._().LLM(
+                lambda b: b.model,
+                lambda b: b.messages,
+                stream=stream,
+                stream_on_delta=_bb_stream_on_delta if stream else None,
+                api_key=lambda b: b.api_key,
+                **llm_call_kwargs,
+            )
+            ._().WriteBlackboard("output")
+            .End()
+        )
+        # fmt: on
 
     async def llm(req: LLMRequest) -> tuple[int, JSON]:
         context = Context()
         blackboard = LLMBlackboard(model=req.model, messages=req.messages, api_key=req.api_key)
+        llm_tree = _make_llm_tree(False, req.llm_call_kwargs)
 
         async with context.using_blackboard(blackboard):
             result = await llm_tree(context)
@@ -3367,6 +3391,7 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
     async def llm_stream(req: LLMRequest, chunks: queue.Queue[str | None]) -> None:
         context = Context()
         blackboard = LLMBlackboard(model=req.model, messages=req.messages, api_key=req.api_key)
+        stream_llm_tree = _make_llm_tree(True, req.llm_call_kwargs)
 
         def on_delta(b: "LLMBlackboard", fulltext: str, delta: str, done: bool) -> None:
             if delta:
@@ -3426,6 +3451,7 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
             messages = payload.get("messages")
             stream = payload.get("stream", False)
             api_key = payload.get("api_key")
+            llm_call_kwargs = {k: v for k, v in payload.items() if k not in {"model", "messages", "stream", "api_key"}}
             if not isinstance(model, str) or not model:
                 raise TasktreeError("field 'model' must be a non-empty string")
             if not isinstance(messages, list):
@@ -3434,7 +3460,13 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
                 raise TasktreeError("field 'stream' must be a bool")
             if api_key is not None and not isinstance(api_key, str):
                 raise TasktreeError("field 'api_key' must be a string or null")
-            return LLMRequest(model=model, messages=cast(list[JSON], messages), stream=stream, api_key=api_key)
+            return LLMRequest(
+                model=model,
+                messages=cast(list[JSON], messages),
+                stream=stream,
+                api_key=api_key,
+                llm_call_kwargs=llm_call_kwargs,
+            )
 
         def _send_json(self, status: int, payload: JSON) -> None:
             body = orjson.dumps(payload, default=_orjson_default_serializer)

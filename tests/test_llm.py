@@ -213,3 +213,40 @@ async def test_llm_streaming_tokens(mock_openai):
     assert trace.attributes["prompt_tokens"] == 2
     assert trace.attributes["completion_tokens"] == 3
     assert trace.attributes["total_tokens"] == 5
+
+
+async def test_llm_reasoning_is_forwarded_via_extra_body(mock_openai):
+    recorded = {}
+
+    async def handler(**kwargs):
+        recorded.update(kwargs)
+        return {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "_hidden_params": {"response_cost": 0.0},
+        }
+
+    mock_openai(handler=handler)
+
+    # fmt: off
+    tree = (
+        tinytasktree.Tree[Blackboard]("LLMReasoning")
+        .Sequence()
+        ._().LLM(
+            "qwen/qwen3.6-plus",
+            make_messages,
+            base_url=lambda b: b.base_url,
+            reasoning={"enabled": False},
+        )
+        .End()
+    )
+    # fmt: on
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="hi", base_url="https://openrouter.ai/api/v1")
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert result.is_ok()
+    assert "reasoning" not in recorded
+    assert recorded["extra_body"] == {"reasoning": {"enabled": False}}

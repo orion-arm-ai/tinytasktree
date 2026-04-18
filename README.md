@@ -399,8 +399,8 @@ tree = (
 Streaming response example:
 
 ```python
-OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL")
+LLM_API_KEY = os.getenv("LLM_API_KEY")
 
 def on_delta(b, full, delta, done, reason=""):
     if delta:
@@ -414,8 +414,8 @@ tree = (
         lambda b: b.messages,
         stream=True,
         stream_on_delta=on_delta,
-        base_url=lambda b: b.base_url or OPENROUTER_BASE_URL,
-        api_key=OPENROUTER_API_KEY,
+        base_url=lambda b: b.base_url or LLM_BASE_URL,
+        api_key=LLM_API_KEY,
     )
     .End()
 )
