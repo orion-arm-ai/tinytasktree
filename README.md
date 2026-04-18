@@ -349,7 +349,8 @@ Parses JSON from the last result or from a blackboard source, and returns the pa
 Usage:
 - `src`: last result (default), blackboard attr, or `(blackboard) -> str`
 - `dst`: optional blackboard attr or `(blackboard, data) -> None`
-- Uses JSON parsing with `json-repair` fallback and supports JSON code fences; prefers `orjson` if installed
+- Uses strict JSON parsing and supports JSON code fences; prefers `orjson` if installed
+- For LLM-generated or otherwise non-strict JSON, it is recommended to pass an explicit tolerant `json_loader`, such as one built with `json_repair`
 
 ```python
 tree = (
@@ -357,6 +358,30 @@ tree = (
     .Sequence()
     ._().Function(lambda: '{"a":1}')
     ._().ParseJSON(dst="data")
+    .End()
+)
+```
+
+If you want tolerant parsing, pass a custom `json_loader`. Example with `json_repair`:
+
+```python
+import json_repair
+
+def repairing_json_loader(s: str) -> JSON | None:
+    s = s.strip()
+    if s.startswith("```json"):
+        s = s[len("```json") :]
+    elif s.startswith("```"):
+        s = s[len("```") :]
+    if s.endswith("```"):
+        s = s[: -len("```")]
+    return json_repair.loads(s)
+
+tree = (
+    Tree()
+    .Sequence()
+    ._().Function(lambda: '{"a": 1')
+    ._().ParseJSON(dst="data", json_loader=repairing_json_loader)
     .End()
 )
 ```

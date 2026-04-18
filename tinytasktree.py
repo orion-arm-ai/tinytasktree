@@ -170,7 +170,6 @@ from typing import (
 )
 from urllib.parse import unquote, urlparse
 
-import json_repair
 from openai import AsyncOpenAI
 
 try:
@@ -1084,13 +1083,13 @@ class SubtreeForwarderNode[B, B1](LeafNode[B]):
 
 type BlackboardAttrGetter[B] = Callable[[B], Any]
 
-type JSONLoader = Callable[[str], JSON]
+type JSONLoader = Callable[[str], JSON | None]
 
 _JSON_FENCE = "```"
 _JSON_FENCE_JSON = "```json"
 
 
-def json_loader_trying_repair(s: str) -> JSON:
+def json_loader_default(s: str) -> JSON | None:
     s = s.strip()
     if s.startswith(_JSON_FENCE_JSON):
         s = s[len(_JSON_FENCE_JSON) :]
@@ -1101,7 +1100,7 @@ def json_loader_trying_repair(s: str) -> JSON:
     try:
         return cast(JSON, _json_loads(s))
     except Exception:
-        return cast(JSON, json_repair.loads(s))
+        return None
 
 
 class ParseJSON[B](LeafNode[B]):
@@ -1117,7 +1116,7 @@ class ParseJSON[B](LeafNode[B]):
         LeafNode.__init__(self, name)
         self._src = src
         self._dst = dst
-        self._json_loader = json_loader or json_loader_trying_repair
+        self._json_loader = json_loader or json_loader_default
 
     def _get_src_data(self, context: Context) -> str:
         if self._src is None:  # source from last_result
@@ -2574,9 +2573,11 @@ class Tree[B](_ForwardingChildNode[B]):
             - `None`: Does not write to the blackboard.
             - `str`: Writes to `blackboard.<dst>`.
             - `Callable`: A setter function `f(blackboard, parsed_data) -> None`.
-        :param json_loader: A function to parse json into `JSON`, form: `f(str) -> JSON`.
-            Defaults to `json_loader_trying_repair`, which strips common ```json fences and
-            tries `json_repair` on JSON parse failure.
+        :param json_loader: A function to parse json into `JSON | None`, form: `f(str) -> JSON | None`.
+            Defaults to `json_loader_default`, which strips common ```json fences and
+            parses strict JSON. Return `None` to make `ParseJSON` fail gracefully.
+            For LLM-generated or otherwise non-strict JSON, it is recommended to
+            pass an explicit tolerant loader such as one built with `json_repair`.
         :param name: Optional node name.
 
         Example::
