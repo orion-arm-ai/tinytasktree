@@ -2567,7 +2567,7 @@ class Tree[B](_ForwardingChildNode[B]):
             3) `openai-python`'s default resolution such as `OPENAI_API_KEY`
             4) None
         :param base_url: Optional base URL string or a factory function `f(blackboard) -> str | None`.
-            Use this for OpenAI-compatible providers such as OpenRouter while keeping `model`
+            Use this for OpenAI-compatible providers while keeping `model`
             independent from the transport endpoint.
         :param name: Optional name for the node.
         :param llm_call_kwargs: Extra keyword arguments forwarded to

@@ -378,7 +378,7 @@ tree = (
 #### LLM <span id="llm"></span> <a href="#ref">[↑]</a>
 
 Calls an LLM via openai-python and returns the output text. Supports streaming,
-API key factories, and OpenAI-compatible base URLs such as OpenRouter.
+API key factories, and OpenAI-compatible base URLs for custom LLM gateways.
 
 Usage:
 - `model` / `messages` can be values or `(blackboard) -> ...` factories

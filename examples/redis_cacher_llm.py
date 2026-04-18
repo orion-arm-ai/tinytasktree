@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")  # e
 from tinytasktree import JSON, Context, FileTraceStorageHandler, Tree, set_default_global_redis_client
 
 # Requirements:
-#   - LLM_BASE_URL and LLM_API_KEY set for OpenRouter access
+#   - LLM_BASE_URL and LLM_API_KEY set for your LLM service
 #   - Redis running and REDIS_URL set (default: redis://127.0.0.1:6379)
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY")

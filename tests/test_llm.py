@@ -161,16 +161,16 @@ async def test_llm_base_url_factory_keeps_model_independent(mock_openai):
     # fmt: on
 
     context = tinytasktree.Context()
-    blackboard = Blackboard(prompt="hi", base_url="https://openrouter.ai/api/v1")
+    blackboard = Blackboard(prompt="hi", base_url="https://llm.example/v1")
     async with context.using_blackboard(blackboard):
         result = await tree(context)
 
     assert result.is_ok()
     assert recorded["model"] == "openai/gpt-4.1-mini"
-    assert recorded["client_kwargs"].get("base_url") == "https://openrouter.ai/api/v1"
+    assert recorded["client_kwargs"].get("base_url") == "https://llm.example/v1"
 
     trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
-    assert trace.attributes["base_url"] == "https://openrouter.ai/api/v1"
+    assert trace.attributes["base_url"] == "https://llm.example/v1"
 
 
 async def test_llm_streaming_tokens(mock_openai):
@@ -243,7 +243,7 @@ async def test_llm_reasoning_is_forwarded_via_extra_body(mock_openai):
     # fmt: on
 
     context = tinytasktree.Context()
-    blackboard = Blackboard(prompt="hi", base_url="https://openrouter.ai/api/v1")
+    blackboard = Blackboard(prompt="hi", base_url="https://llm.example/v1")
     async with context.using_blackboard(blackboard):
         result = await tree(context)
 
