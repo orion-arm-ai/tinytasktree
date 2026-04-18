@@ -115,15 +115,13 @@ Then start the backend and UI:
 
 ```bash
 python -m tinytasktree --httpserver --host 127.0.0.1 --port 8000 --trace-dir .traces
-# Visit http://127.0.0.1:8000/<trace-id>
+# Visit http://127.0.0.1:8000
 ```
 
 Notes:
 - `--trace-dir .traces` must point to the same directory used by `FileTraceStorageHandler(".traces")`
-- When the UI is bundled into the Python package, the backend serves `index.html` and assets directly
-- Recommended default: open `http://127.0.0.1:8000/<trace_id>`
-- Use `http://127.0.0.1:5173/<trace_id>` only when you are running the Vite dev UI
-- If you only open `http://127.0.0.1:8000` or `http://127.0.0.1:5173`, the UI starts without a selected trace
+- Opening `http://127.0.0.1:8000/` lists saved traces in the current trace directory, newest first
+- Opening `http://127.0.0.1:8000/<trace_id>` loads a specific trace directly
 
 ![](misc/tasktree-ui.png)
 
@@ -389,10 +387,10 @@ tree = (
 )
 ```
 
-another example:
+Another example:
 
 ```python
-def set_parsed_value(b: blackboard, d: JSON) -> None:
+def set_parsed_value(b: Blackboard, d: JSON) -> None:
     b.parsed = d
 
 tree = (
@@ -430,9 +428,13 @@ tree = (
 Streaming response example:
 
 ```python
+import os
+
+from tinytasktree import LLMModel, LLMProvider, Tree
+
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY")
-provider = LLMProvider(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
+provider = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
 
 def on_delta(b, full, delta, done, reason=""):
     if delta:
@@ -744,7 +746,7 @@ tree = (
 )
 ```
 
-With `.Fallback()` example::
+With `.Fallback()`:
 
 ```python
 tree = (
@@ -793,8 +795,8 @@ tree = (
 )
 ```
 
-With a `value_validator` example, in such case: the cache is only considered a hit if this
-value matches the one stored during the cache set. Useful for invalidating cache when dependent logic or state changes::
+With a `value_validator`, the cache is only considered a hit if this
+value matches the one stored during the cache set. This is useful for invalidating cache when dependent logic or state changes:
 
 ```python
 tree = (
