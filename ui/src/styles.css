@@ -710,6 +710,9 @@ body {
   flex: 0 0 auto;
   font-weight: 700;
   border: 1px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 
 .stack-kind-tone {
@@ -722,6 +725,11 @@ body {
   font-size: 11px;
   padding: 1px 5px;
   border-radius: 4px;
+}
+
+.stack-kind-icon {
+  font-size: 12px;
+  line-height: 1;
 }
 
 .stack-row.compact .stack-status {
@@ -841,6 +849,19 @@ body {
   font-weight: 700;
   font-size: 18px;
   margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.trace-card-kind-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: #9fb7d9;
+  flex: 0 0 auto;
 }
 
 .trace-status {

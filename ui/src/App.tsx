@@ -54,6 +54,146 @@ const PLAYGROUND_RESERVED_KEYS = new Set([
     "total_tokens",
 ]);
 
+type KindIconProps = {
+    className?: string;
+};
+
+type LucideNode = [tag: "path" | "circle" | "line" | "rect", attrs: Record<string, string>];
+
+function LucideIcon({ nodes, className }: { nodes: LucideNode[]; className?: string }) {
+    return (
+        <svg
+            className={className}
+            xmlns="http://www.w3.org/2000/svg"
+            width="1em"
+            height="1em"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+        >
+            {nodes.map(([tag, attrs], index) => React.createElement(tag, { key: index, ...attrs }))}
+        </svg>
+    );
+}
+
+const TreesIcon = ({ className }: KindIconProps) => (
+    <LucideIcon
+        className={className}
+        nodes={[
+            ["path", { d: "M10 10v.2A3 3 0 0 1 8.9 16H5a3 3 0 0 1-1-5.8V10a3 3 0 0 1 6 0Z" }],
+            ["path", { d: "M7 16v6" }],
+            ["path", { d: "M13 19v3" }],
+            ["path", { d: "M12 19h8.3a1 1 0 0 0 .7-1.7L18 14h.3a1 1 0 0 0 .7-1.7L16 9h.2a1 1 0 0 0 .8-1.7L13 3l-1.4 1.5" }],
+        ]}
+    />
+);
+
+const WaypointsIcon = ({ className }: KindIconProps) => (
+    <LucideIcon
+        className={className}
+        nodes={[
+            ["circle", { cx: "12", cy: "4.5", r: "2.5" }],
+            ["path", { d: "m10.2 6.3-3.9 3.9" }],
+            ["circle", { cx: "4.5", cy: "12", r: "2.5" }],
+            ["path", { d: "M7 12h10" }],
+            ["circle", { cx: "19.5", cy: "12", r: "2.5" }],
+            ["path", { d: "m13.8 17.7 3.9-3.9" }],
+            ["circle", { cx: "12", cy: "19.5", r: "2.5" }],
+        ]}
+    />
+);
+
+const GitBranchIcon = ({ className }: KindIconProps) => (
+    <LucideIcon
+        className={className}
+        nodes={[
+            ["line", { x1: "6", x2: "6", y1: "3", y2: "15" }],
+            ["circle", { cx: "18", cy: "6", r: "3" }],
+            ["circle", { cx: "6", cy: "18", r: "3" }],
+            ["path", { d: "M18 9a9 9 0 0 1-9 9" }],
+        ]}
+    />
+);
+
+const SplitIcon = ({ className }: KindIconProps) => (
+    <LucideIcon
+        className={className}
+        nodes={[
+            ["path", { d: "M16 3h5v5" }],
+            ["path", { d: "M8 3H3v5" }],
+            ["path", { d: "M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3" }],
+            ["path", { d: "m15 9 6-6" }],
+        ]}
+    />
+);
+
+const NetworkIcon = ({ className }: KindIconProps) => (
+    <LucideIcon
+        className={className}
+        nodes={[
+            ["rect", { x: "16", y: "16", width: "6", height: "6", rx: "1" }],
+            ["rect", { x: "2", y: "16", width: "6", height: "6", rx: "1" }],
+            ["rect", { x: "9", y: "2", width: "6", height: "6", rx: "1" }],
+            ["path", { d: "M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3" }],
+            ["path", { d: "M12 12V8" }],
+        ]}
+    />
+);
+
+const BracesIcon = ({ className }: KindIconProps) => (
+    <LucideIcon
+        className={className}
+        nodes={[
+            ["path", { d: "M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1" }],
+            ["path", { d: "M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1" }],
+        ]}
+    />
+);
+
+const ScaleIcon = ({ className }: KindIconProps) => (
+    <LucideIcon
+        className={className}
+        nodes={[
+            ["path", { d: "m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z" }],
+            ["path", { d: "m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z" }],
+            ["path", { d: "M7 21h10" }],
+            ["path", { d: "M12 3v18" }],
+            ["path", { d: "M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2" }],
+        ]}
+    />
+);
+
+const WandSparklesIcon = ({ className }: KindIconProps) => (
+    <LucideIcon
+        className={className}
+        nodes={[
+            ["path", { d: "m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72" }],
+            ["path", { d: "m14 7 3 3" }],
+            ["path", { d: "M5 6v4" }],
+            ["path", { d: "M19 14v4" }],
+            ["path", { d: "M10 2v2" }],
+            ["path", { d: "M7 8H3" }],
+            ["path", { d: "M21 16h-4" }],
+            ["path", { d: "M11 3H9" }],
+        ]}
+    />
+);
+
+const GitCommitHorizontalIcon = ({ className }: KindIconProps) => (
+    <LucideIcon
+        className={className}
+        nodes={[
+            ["circle", { cx: "12", cy: "12", r: "3" }],
+            ["line", { x1: "3", x2: "9", y1: "12", y2: "12" }],
+            ["line", { x1: "15", x2: "21", y1: "12", y2: "12" }],
+        ]}
+    />
+);
+
 type TraceNodeJson = {
     name: string;
     kind: string;
@@ -98,6 +238,7 @@ type NodeTone = {
     className: string;
     compactClassName: string;
     accent: string;
+    icon: React.ComponentType<{ className?: string }>;
 };
 
 type TraceStatus = "OK" | "FAIL" | "UNKNOWN";
@@ -561,49 +702,123 @@ function formatStackDuration(value: number): string {
     return `${value.toFixed(1)}ms`;
 }
 
-function getNodeTone(kind: string | undefined): NodeTone {
+function normalizeNodeKind(kind: string | undefined): string {
     switch (kind || "") {
+        case "Function":
+            return "Lambda";
+        case "Log":
+        case "TODO":
+        case "Failure":
+        case "WriteBlackboard":
+        case "ShowBlackboard":
+        case "Subtree":
+        case "ParseJSON":
+            return "Leaf";
+        case "Assertion":
+        case "If":
+        case "Else":
+            return "Condition";
+        case "ForceOk":
+        case "ForceFail":
+        case "Invert":
+        case "Return":
+        case "Retry":
+        case "While":
+        case "Timeout":
+        case "Fallback":
+        case "Terminable":
+        case "RedisCacher":
+        case "Wrapper":
+            return "Decorator";
+        case "RandomSelector":
+            return "Selector";
+        default:
+            return kind || "Node";
+    }
+}
+
+function getNodeTone(kind: string | undefined): NodeTone {
+    const normalizedKind = normalizeNodeKind(kind);
+    switch (normalizedKind) {
         case "Tree":
             return {
-                label: "Tree",
+                label: kind || "Tree",
                 className: "stack-kind-tone tree",
                 compactClassName: "stack-kind-compact tree",
                 accent: "#0f7a3c",
+                icon: TreesIcon,
             };
         case "Sequence":
             return {
-                label: "Sequence",
+                label: kind || "Sequence",
                 className: "stack-kind-tone sequence",
                 compactClassName: "stack-kind-compact sequence",
                 accent: "#0ea5e9",
+                icon: WaypointsIcon,
             };
         case "Selector":
             return {
-                label: "Selector",
+                label: kind || "Selector",
                 className: "stack-kind-tone selector",
                 compactClassName: "stack-kind-compact selector",
                 accent: "#7c3aed",
+                icon: GitBranchIcon,
             };
         case "Parallel":
             return {
-                label: "Parallel",
+                label: kind || "Parallel",
                 className: "stack-kind-tone parallel",
                 compactClassName: "stack-kind-compact parallel",
                 accent: "#d97706",
+                icon: SplitIcon,
             };
         case "Gather":
             return {
-                label: "Gather",
+                label: kind || "Gather",
                 className: "stack-kind-tone gather",
                 compactClassName: "stack-kind-compact gather",
                 accent: "#0891b2",
+                icon: NetworkIcon,
             };
         case "LLM":
             return {
-                label: "LLM",
+                label: kind || "LLM",
                 className: "stack-kind-tone llm",
                 compactClassName: "stack-kind-compact llm",
                 accent: "#2563eb",
+                icon: WandSparklesIcon,
+            };
+        case "Lambda":
+            return {
+                label: kind || "Lambda",
+                className: "stack-kind-tone default",
+                compactClassName: "stack-kind-compact default",
+                accent: "#d946ef",
+                icon: BracesIcon,
+            };
+        case "Condition":
+            return {
+                label: kind || "Condition",
+                className: "stack-kind-tone default",
+                compactClassName: "stack-kind-compact default",
+                accent: "#84cc16",
+                icon: ScaleIcon,
+            };
+        case "Decorator":
+            return {
+                label: kind || "Decorator",
+                className: "stack-kind-tone default",
+                compactClassName: "stack-kind-compact default",
+                accent: "#f97316",
+                icon: WandSparklesIcon,
+            };
+        case "Leaf":
+            return {
+                label: kind || "Leaf",
+                className: "stack-kind-tone default",
+                compactClassName: "stack-kind-compact default",
+                accent: "#94a3b8",
+                icon: GitCommitHorizontalIcon,
             };
         default:
             return {
@@ -611,6 +826,7 @@ function getNodeTone(kind: string | undefined): NodeTone {
                 className: "stack-kind-tone default",
                 compactClassName: "stack-kind-compact default",
                 accent: "#64748b",
+                icon: GitCommitHorizontalIcon,
             };
     }
 }
@@ -625,6 +841,8 @@ function TraceCard(props: NodeProps<TraceNodeData>) {
     const { data, selected } = props;
     const isSelected = data.isSelected || selected;
     const status = data.status;
+    const tone = getNodeTone(data.node.kind);
+    const KindIcon = tone.icon;
     let borderColor = "#3fb950";
     if (status === "FAIL") borderColor = "#f85149";
     if (status === "UNKNOWN") borderColor = "#6e7681";
@@ -650,6 +868,7 @@ function TraceCard(props: NodeProps<TraceNodeData>) {
             <Handle type="target" position={Position.Left} className="trace-handle" />
             <Handle type="source" position={Position.Right} className="trace-handle" />
             <div className="trace-card-title">
+                <span className="trace-card-kind-icon"><KindIcon /></span>
                 {foldedPrefix}
                 {data.node.name || "(unnamed)"}
             </div>
@@ -1799,6 +2018,7 @@ function TraceUI() {
                                         const inSelectedPath = selectedPathIds.includes(row.id);
                                         const tokenLine = row.node.kind === "LLM" ? formatTokenUsage(tokenUsageFromAttributes(row.node.attributes)) : "";
                                         const tone = getNodeTone(row.node.kind);
+                                        const KindIcon = tone.icon;
                                         const subtreeBackground =
                                             subtreeColorOn && row.subtreeColor && row.status !== "FAIL"
                                                 ? `linear-gradient(to right, transparent 0%, ${hexToRgba(row.subtreeColor, compactMode ? 0.06 : 0.03)} 36%, ${hexToRgba(row.subtreeColor, compactMode ? 0.16 : 0.11)} 100%)`
@@ -1846,7 +2066,10 @@ function TraceUI() {
                                                     <div className="stack-main-copy">
                                                         <div className="stack-main-line">
                                                             <span className="stack-name">{row.node.name || "(unnamed)"}</span>
-                                                            <span className={compactMode ? tone.compactClassName : tone.className}>{tone.label}</span>
+                                                            <span className={compactMode ? tone.compactClassName : tone.className}>
+                                                                <KindIcon className="stack-kind-icon" />
+                                                                {tone.label}
+                                                            </span>
                                                             <span className={`stack-status stack-status-${row.status.toLowerCase()}`}>{row.status}</span>
                                                         </div>
                                                         {!compactMode && tokenLine && <div className="stack-subline">{tokenLine}</div>}
