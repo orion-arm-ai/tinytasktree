@@ -39,6 +39,26 @@ class CustomTree(tinytasktree.Tree[Blackboard]):
         return self._attach(ForceValueNode(value, name))
 
 
+class MarkerLeafNode(tinytasktree.LeafNode[Blackboard]):
+    KIND = "MarkerLeaf"
+
+    def __init__(self, marker: list[str], name: str = "") -> None:
+        super().__init__(name)
+        self._marker = marker
+
+    def OnBuildEnd(self) -> None:
+        super().OnBuildEnd()
+        self._marker.append("built")
+
+    async def _impl(self, context: tinytasktree.Context, tracer: tinytasktree.Tracer) -> tinytasktree.Result:
+        return tinytasktree.Result.OK("ok")
+
+
+class CustomLeafTree(tinytasktree.Tree[Blackboard]):
+    def MarkerLeaf(self, marker: list[str], name: str = "") -> "CustomLeafTree":
+        return self._attach(MarkerLeafNode(marker, name))
+
+
 async def test_custom_builder_method():
     def write_child_value(b: Blackboard) -> str:
         b.value = "child"
@@ -61,3 +81,12 @@ async def test_custom_builder_method():
     assert result.is_ok()
     assert result.data == "ok"
     assert blackboard.value == "child"
+
+
+async def test_attach_leaf_node_calls_on_build_end():
+    marker: list[str] = []
+
+    tree = CustomLeafTree("CustomLeafTree").MarkerLeaf(marker).End()
+
+    assert marker == ["built"]
+    assert tree.child().fullname == "MarkerLeaf"

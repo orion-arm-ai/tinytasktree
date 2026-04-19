@@ -196,68 +196,6 @@ __all__ = (
 )
 
 
-def _json_loads(data: str | bytes | bytearray) -> Any:
-    if orjson is not None:
-        return orjson.loads(data)
-    if isinstance(data, bytearray):
-        data = bytes(data)
-    return json.loads(data)
-
-
-def _json_dumps(
-    data: Any,
-    *,
-    default: Callable[[Any], Any] | None = None,
-    indent: int | None = None,
-) -> bytes:
-    if orjson is not None:
-        option = orjson.OPT_INDENT_2 if indent == 2 else 0
-        if default is None:
-            return orjson.dumps(data, option=option)
-        return orjson.dumps(data, default=default, option=option)
-    return json.dumps(
-        data,
-        default=default,
-        indent=indent,
-        ensure_ascii=False,
-        separators=(",", ":") if indent is None else None,
-    ).encode("utf-8")
-
-
-def _find_bundled_ui_root() -> Any | None:
-    try:
-        ui_root = importlib.resources.files("tinytasktree").joinpath("ui_dist")
-        if ui_root.joinpath("index.html").is_file():
-            return ui_root
-    except Exception:
-        pass
-
-    local_ui_root = Path(__file__).resolve().parents[1].joinpath("ui", "dist")
-    if local_ui_root.joinpath("index.html").is_file():
-        return local_ui_root
-    return None
-
-
-def _resolve_ui_file(ui_root: Any, request_path: str) -> tuple[Any, str] | None:
-    normalized = request_path.lstrip("/") or "index.html"
-    parts = [part for part in PurePosixPath(normalized).parts if part not in {"", "."}]
-    if any(part == ".." for part in parts):
-        return None
-
-    candidate = ui_root.joinpath(*parts) if parts else ui_root.joinpath("index.html")
-    if candidate.is_file():
-        content_type = mimetypes.guess_type(str(PurePosixPath(*parts)) if parts else "index.html")[0]
-        return candidate, content_type or "application/octet-stream"
-
-    if parts and any("." in part for part in parts):
-        return None
-
-    index_file = ui_root.joinpath("index.html")
-    if index_file.is_file():
-        return index_file, "text/html; charset=utf-8"
-    return None
-
-
 ##############
 # Common Types
 ##############
@@ -267,11 +205,8 @@ type JSON = dict[str, Any]
 
 class CacheStore(Protocol):
     async def get(self, key: str) -> Any: ...
-
     async def set(self, key: str, value: Any, ex: int | float | timedelta | None = None) -> Any: ...
-
     async def delete(self, key: str) -> Any: ...
-
     async def exists(self, key: str) -> Any: ...
 
 
@@ -497,8 +432,22 @@ class FileTraceStorageHandler:
     def __init__(self, dirpath: str = ".traces") -> None:
         self._dirpath = dirpath
 
+    def _normalize_trace_id(self, trace_id: str) -> str:
+        normalized = trace_id.strip()
+        if (
+            not normalized
+            or normalized != trace_id
+            or "/" in normalized
+            or "\\" in normalized
+            or normalized in {".", ".."}
+            or ".." in normalized
+        ):
+            raise TasktreeProgrammingError(f"Invalid trace_id: {trace_id!r}")
+        return normalized
+
     def _path_for(self, trace_id: str) -> str:
-        return os.path.join(self._dirpath, f"{trace_id}.json")
+        normalized = self._normalize_trace_id(trace_id)
+        return os.path.join(self._dirpath, f"{normalized}.json")
 
     def _derive_trace_name(self, trace_root: TraceRoot) -> str:
         def normalize(name: str) -> str:
@@ -825,7 +774,8 @@ class SingleChildNode[B](InternalNode[B]):
 
     @final
     def child(self) -> Node[B]:
-        assert self._child, TasktreeProgrammingError(f"{self}: no child")
+        if self._child is None:
+            raise TasktreeProgrammingError(f"{self}: no child")
         return self._child
 
     def OnBuildEnd(self) -> None:
@@ -943,9 +893,8 @@ class FunctionNode[B](LeafNode[B]):
     @override
     def OnBuildEnd(self) -> None:
         LeafNode.OnBuildEnd(self)
-        assert self._func_param_cnt in {0, 1, 2}, TasktreeProgrammingError(
-            f"{self.fullname}:: invalid function params count"
-        )
+        if self._func_param_cnt not in {0, 1, 2}:
+            raise TasktreeProgrammingError(f"{self.fullname}:: invalid function params count")
 
     @override
     async def _impl(self, context: Context, tracer: Tracer) -> Result:
@@ -995,7 +944,7 @@ class LogNode[B](LeafNode[B]):
         if self.name:
             self.fullname = f"{self.KIND}({self.name}, {self._level})"
         else:
-            self.fullname == f"{self.KIND}({self._level})"
+            self.fullname = f"{self.KIND}({self._level})"
 
     @override
     async def _impl(self, context: Context, tracer: Tracer) -> Result:
@@ -1045,7 +994,8 @@ class WriteBlackboardNode[B](LeafNode[B]):
         LeafNode.__init__(self, name)
         self._attr = attr_or_func if isinstance(attr_or_func, str) else ""
         self._func = attr_or_func if callable(attr_or_func) else None
-        assert self._attr or self._func, TasktreeProgrammingError("WriteBlackboard: invalid parameter")
+        if not (self._attr or self._func):
+            raise TasktreeProgrammingError("WriteBlackboard: invalid parameter")
 
     @override
     async def _impl(self, context: Context, tracer: Tracer) -> Result:
@@ -1113,9 +1063,8 @@ class _ConditionFunctionHandler_Mixin[B](Node[B]):
     @override
     def OnBuildEnd(self) -> None:
         Node.OnBuildEnd(self)
-        assert self._condition_params_cnt in {0, 1, 2}, TasktreeProgrammingError(
-            f"{self.fullname} :: invalid condition params count"
-        )
+        if self._condition_params_cnt not in {0, 1, 2}:
+            raise TasktreeProgrammingError(f"{self.fullname} :: invalid condition params count")
 
     async def _call_condition(self, context: Context, tracer: Tracer) -> bool:
         if self._is_condition_async:
@@ -1472,7 +1421,9 @@ class LLMNode[B](LeafNode[B]):
         return model_input, None, 0.0, 0.0, {}, {}, {}
 
     @staticmethod
-    def _compute_priced_cost(tokens: dict[str, int] | None, input_price_per_m: float, output_price_per_m: float) -> float | None:
+    def _compute_priced_cost(
+        tokens: dict[str, int] | None, input_price_per_m: float, output_price_per_m: float
+    ) -> float | None:
         if not tokens:
             return None
         prompt_tokens = tokens.get("prompt")
@@ -1572,17 +1523,14 @@ class LLMNode[B](LeafNode[B]):
     def OnBuildEnd(self) -> None:
         LeafNode.OnBuildEnd(self)
         if self._stream_on_delta:
-            assert self._stream_on_delta_params_cnt in {4, 5}, TasktreeProgrammingError(
-                f"{self.fullname}: stream callback params count invalid"
-            )
+            if self._stream_on_delta_params_cnt not in {4, 5}:
+                raise TasktreeProgrammingError(f"{self.fullname}: stream callback params count invalid")
         if callable(self._api_key):
-            assert self._api_key_params_cnt in {1, 2}, TasktreeProgrammingError(
-                f"{self.fullname}: api_key factory params count invalid"
-            )
+            if self._api_key_params_cnt not in {1, 2}:
+                raise TasktreeProgrammingError(f"{self.fullname}: api_key factory params count invalid")
         if callable(self._base_url):
-            assert self._base_url_params_cnt == 1, TasktreeProgrammingError(
-                f"{self.fullname}: base_url factory params count invalid"
-            )
+            if self._base_url_params_cnt != 1:
+                raise TasktreeProgrammingError(f"{self.fullname}: base_url factory params count invalid")
 
     async def _call_stream_delta_callback(
         self, b: B, full_output: str, delta_content: str, finished: bool, finish_reason: str
@@ -1607,9 +1555,15 @@ class LLMNode[B](LeafNode[B]):
     async def _impl(self, context: Context, tracer: Tracer) -> Result:
         b = cast(B, context._current_blackboard())
         model_input = self._model(b) if callable(self._model) else self._model
-        model, provider, input_price_per_m, output_price_per_m, model_client_kwargs, model_extra_body, model_llm_call_kwargs = (
-            self._resolve_model_input(model_input)
-        )
+        (
+            model,
+            provider,
+            input_price_per_m,
+            output_price_per_m,
+            model_client_kwargs,
+            model_extra_body,
+            model_llm_call_kwargs,
+        ) = self._resolve_model_input(model_input)
         messages = self._messages(b) if callable(self._messages) else self._messages
         stream = self._stream(b) if callable(self._stream) else self._stream
         merged_client_kwargs = self._merge_llm_call_kwargs(
@@ -2547,6 +2501,7 @@ class Tree[B](_ForwardingChildNode[B]):
     def _attach_leaf_node(self, node: LeafNode[B]) -> Self:
         self._adjust()
         self._stack[-1].append_child(node)
+        node.OnBuildEnd()
         self._level = 1
         return self
 
@@ -3572,6 +3527,68 @@ else:
     logger.setLevel(logging.INFO)
 
 
+def _json_loads(data: str | bytes | bytearray) -> Any:
+    if orjson is not None:
+        return orjson.loads(data)
+    if isinstance(data, bytearray):
+        data = bytes(data)
+    return json.loads(data)
+
+
+def _json_dumps(
+    data: Any,
+    *,
+    default: Callable[[Any], Any] | None = None,
+    indent: int | None = None,
+) -> bytes:
+    if orjson is not None:
+        option = orjson.OPT_INDENT_2 if indent == 2 else 0
+        if default is None:
+            return orjson.dumps(data, option=option)
+        return orjson.dumps(data, default=default, option=option)
+    return json.dumps(
+        data,
+        default=default,
+        indent=indent,
+        ensure_ascii=False,
+        separators=(",", ":") if indent is None else None,
+    ).encode("utf-8")
+
+
+def _find_bundled_ui_root() -> Any | None:
+    try:
+        ui_root = importlib.resources.files("tinytasktree").joinpath("ui_dist")
+        if ui_root.joinpath("index.html").is_file():
+            return ui_root
+    except Exception:
+        pass
+
+    local_ui_root = Path(__file__).resolve().parents[1].joinpath("ui", "dist")
+    if local_ui_root.joinpath("index.html").is_file():
+        return local_ui_root
+    return None
+
+
+def _resolve_ui_file(ui_root: Any, request_path: str) -> tuple[Any, str] | None:
+    normalized = request_path.lstrip("/") or "index.html"
+    parts = [part for part in PurePosixPath(normalized).parts if part not in {"", "."}]
+    if any(part == ".." for part in parts):
+        return None
+
+    candidate = ui_root.joinpath(*parts) if parts else ui_root.joinpath("index.html")
+    if candidate.is_file():
+        content_type = mimetypes.guess_type(str(PurePosixPath(*parts)) if parts else "index.html")[0]
+        return candidate, content_type or "application/octet-stream"
+
+    if parts and any("." in part for part in parts):
+        return None
+
+    index_file = ui_root.joinpath("index.html")
+    if index_file.is_file():
+        return index_file, "text/html; charset=utf-8"
+    return None
+
+
 ################
 # httpserver
 ################
@@ -3612,6 +3629,9 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
         def _handle_trace(self, trace_id: str) -> None:
             try:
                 payload = asyncio.run(storage.query(trace_id))
+            except TasktreeProgrammingError as e:
+                self._send_json(HTTPStatus.NOT_FOUND, {"detail": str(e)})
+                return
             except FileNotFoundError as e:
                 self._send_json(HTTPStatus.NOT_FOUND, {"detail": str(e)})
                 return
