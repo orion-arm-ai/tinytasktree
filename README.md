@@ -151,6 +151,7 @@ Notes:
     - [Subtree](#subtree)
     - [ParseJSON](#parsejson)
     - [LLM](#llm)
+    - [Tool Call](#tool-call)
   - [Composite Nodes](#composite-nodes)
     - [Sequence](#sequence)
     - [Selector](#selector)
@@ -454,6 +455,110 @@ tree = (
     Tree()
     .Sequence()
     ._().LLM(lambda b: b.model, lambda b: b.messages, stream=True, stream_on_delta=on_delta)
+    .End()
+)
+```
+
+
+
+## Tool Call <span id="tool-call"></span> <a href="#ref">[↑]</a>
+
+`LLMNode` supports OpenAI-style tool calls out of the box. When the LLM returns `tool_calls`,
+the node automatically executes them via a `tool_executor`, appends results to the conversation,
+and re-calls the LLM until the final answer is reached.
+
+```python
+from tinytasktree import JSON, ToolCall, Tree
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the current weather in a given location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "The city and state, e.g. San Francisco, CA"},
+                },
+                "required": ["location"],
+            },
+        },
+    },
+]
+
+def tool_executor(b: Blackboard, tool_call: ToolCall) -> JSON:
+    # Execute a tool call and return the result
+    tool_name = tool_call["function"]["name"]
+    tool_args = tool_call["function"]["arguments"]
+    # ... call your actual tool implementation ...
+    return {"location": "Beijing", "weather": "sunny", "temperature": 25}
+
+tree = (
+    Tree[Blackboard]("WeatherApp")
+    .Sequence()
+    ._().LLM(
+        model,
+        make_messages,
+        tools=TOOLS,
+        tool_executor=tool_executor,   # sync or async
+        max_iterations=5,              # max LLM call rounds
+    )
+    ._().WriteBlackboard("weather_result")
+    .End()
+)
+```
+
+### Key parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `tools` | `list[ToolDef]` or `Callable[[B], list[ToolDef]]` | OpenAI-style tool definitions, or a factory function |
+| `tool_executor` | `Callable[[B, ToolCall], JSON]` or async | Function that executes tool calls. If `None`, tool calls are ignored |
+| `max_iterations` | `int` | Maximum number of LLM call rounds. Default is 5 |
+
+### How it works
+
+1. LLM is called with `tools` passed to the API
+2. If the LLM returns `tool_calls`, `tool_executor` is invoked for each call
+3. Results are appended to the conversation as `tool` messages
+4. LLM is called again with the updated conversation
+5. Steps 2-4 repeat until the LLM returns no `tool_calls` or `max_iterations` is reached
+6. Final output is the LLM's last text response
+
+### Async executor
+
+`tool_executor` can be async:
+
+```python
+async def async_tool_executor(b: Blackboard, tool_call: ToolCall) -> JSON:
+    # await your tool implementation
+    return {"result": "done"}
+
+tree = (
+    Tree[Blackboard]("AsyncTool")
+    .Sequence()
+    ._().LLM(model, make_messages, tools=TOOLS, tool_executor=async_tool_executor)
+    .End()
+)
+```
+
+### Streaming + Tool Calls
+
+Tool calls work with streaming too -- tool call deltas are accumulated and executed after the stream completes:
+
+```python
+tree = (
+    Tree[Blackboard]("StreamTool")
+    .Sequence()
+    ._().LLM(
+        model,
+        make_messages,
+        stream=True,
+        tools=TOOLS,
+        tool_executor=tool_executor,
+        stream_on_delta=lambda b, full, delta, finished: print(delta, end=""),
+    )
     .End()
 )
 ```
@@ -870,6 +975,7 @@ tree = (
 - `TraceStorageHandler` / `FileTraceStorageHandler`: save and load traces
 - `register_global_hook_after_spawned_task_finish(hook)`: hook for Parallel/Gather/Terminable tasks
 - `run_httpserver(host, port, trace_dir)` / `create_http_app(...)`: built-in HTTP trace server
+
 
 ## Contributing <span id="contributing"></span>
 
