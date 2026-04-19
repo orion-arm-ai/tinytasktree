@@ -886,3 +886,194 @@ def test_obj_get_model_dump_safety():
 
     # None object
     assert node._obj_get(None, "key", "default") == "default"
+
+
+# --- Regression tests for fix: messages copy & streaming index merge ---
+
+async def test_llm_static_messages_not_mutated(mock_openai):
+    """Test that passing a static messages list does not get mutated by LLMNode.
+
+    When the caller passes a list directly (not via a callable factory), the
+    LLMNode must not append assistant/tool messages into that list, because
+    the same list object could be reused across multiple LLMNode executions.
+    """
+    call_count = 0
+
+    async def handler(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_weather",
+                                        "arguments": '{"location": "Tokyo"}',
+                                    },
+                                },
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                "_hidden_params": {"response_cost": 0.0},
+            }
+        else:
+            return {
+                "choices": [
+                    {
+                        "message": {"content": "Tokyo is rainy."},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+                "_hidden_params": {"response_cost": 0.0},
+            }
+
+    mock_openai(handler=handler)
+
+    # Static list — not a factory function
+    static_messages = [{"role": "user", "content": "Whats the weather in Tokyo?"}]
+    original_len = len(static_messages)
+
+    def tool_executor(b: Blackboard, tool_call: tinytasktree.ToolCall) -> tinytasktree.JSON:
+        return {"location": "Tokyo", "weather": "rainy"}
+
+    tree = (
+        tinytasktree.Tree[Blackboard]("StaticMessages")
+        .Sequence()
+        ._().LLM(
+            "mock/static",
+            static_messages,  # pass the list directly, not a callable
+            tools=TOOLS,
+            tool_executor=tool_executor,
+            max_iterations=3,
+        )
+        .End()
+    )
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="Tokyo weather")
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert result.is_ok()
+    assert result.data == "Tokyo is rainy."
+    # The static list must not have been mutated
+    assert len(static_messages) == original_len
+    assert static_messages == [{"role": "user", "content": "Whats the weather in Tokyo?"}]
+
+
+async def test_llm_streaming_tool_call_indexed_deltas(mock_openai):
+    """Test that streaming deltas with index (no id) are correctly merged.
+
+    Real OpenAI-compatible streaming responses often split tool_call arguments
+    across multiple chunks. Later chunks may only carry `index` and partial
+    `arguments` without repeating the `id`. The LLMNode must merge these by
+    index when id is absent.
+    """
+    call_count = 0
+
+    async def stream_handler(**kwargs):
+        nonlocal call_count
+        call_count += 1
+
+        if call_count == 1:
+            async def gen():
+                # Chunk 1: initial tool_call with id, name, and first args
+                yield {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_abc",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "get_weather",
+                                            "arguments": '{"loc": "',
+                                        },
+                                    },
+                                ]
+                            },
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+                # Chunk 2: only index + arguments (no id!)
+                yield {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "function": {
+                                            "arguments": 'Berlin"}',
+                                        },
+                                    },
+                                ]
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                }
+
+            return gen()
+        else:
+            async def gen():
+                yield {
+                    "choices": [
+                        {"delta": {"content": "Berlin is cloudy."}, "finish_reason": None},
+                    ],
+                }
+                yield {
+                    "choices": [{"delta": {}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25},
+                }
+
+            return gen()
+
+    mock_openai(handler=stream_handler)
+    executed_calls = []
+
+    def tool_executor(b: Blackboard, tool_call: tinytasktree.ToolCall) -> tinytasktree.JSON:
+        executed_calls.append(tool_call)
+        return {"location": "Berlin", "weather": "cloudy"}
+
+    tree = (
+        tinytasktree.Tree[Blackboard]("StreamIndexDelta")
+        .Sequence()
+        ._().LLM(
+            "mock/stream-index",
+            make_messages,
+            stream=True,
+            tools=TOOLS,
+            tool_executor=tool_executor,
+            max_iterations=3,
+        )
+        .End()
+    )
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="Berlin weather")
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert result.is_ok()
+    assert result.data == "Berlin is cloudy."
+    assert call_count == 2
+    assert len(executed_calls) == 1
+    # The merged arguments should combine both chunks
+    assert executed_calls[0].function.name == "get_weather"
+    assert executed_calls[0].function.arguments == '{"loc": "Berlin"}'
+    assert executed_calls[0].id == "call_abc"
