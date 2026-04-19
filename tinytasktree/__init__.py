@@ -1280,6 +1280,7 @@ class ToolCall:
     id: str = ""
     type: str = "function"
     function: ToolFunction = field(default_factory=ToolFunction)
+    index: int | None = None
 
     def to_dict(self) -> JSON:
         return asdict(self)
@@ -1300,6 +1301,7 @@ class ToolCall:
             id=data.get("id", "") if isinstance(data, dict) else "",
             type=data.get("type", "function") if isinstance(data, dict) else "function",
             function=func,
+            index=data.get("index") if isinstance(data, dict) else None,
         )
 
 
@@ -1687,6 +1689,7 @@ class LLMNode[B](LeafNode[B]):
             model_llm_call_kwargs,
         ) = self._resolve_model_input(model_input)
         messages = self._messages(b) if callable(self._messages) else self._messages
+        messages = list(messages)
         stream = self._stream(b) if callable(self._stream) else self._stream
         merged_client_kwargs = self._merge_llm_call_kwargs(
             provider.client_kwargs if provider is not None else None,
@@ -1794,7 +1797,13 @@ class LLMNode[B](LeafNode[B]):
                             for new_tc_raw in delta_tool_calls:
                                 new_tc = ToolCall.from_dict(new_tc_raw)
                                 tc_id = new_tc.id
+                                # Try matching by id first, then by index (for deltas without id)
                                 existing = next((t for t in streamed_tool_calls if t.id == tc_id), None)
+                                if existing is None and new_tc.index is not None:
+                                    existing = next(
+                                        (t for i, t in enumerate(streamed_tool_calls) if i == new_tc.index),
+                                        None,
+                                    )
                                 if existing:
                                     existing = replace(
                                         existing,
@@ -1803,7 +1812,7 @@ class LLMNode[B](LeafNode[B]):
                                             arguments=existing.function.arguments + new_tc.function.arguments,
                                         ),
                                     )
-                                    idx = next(i for i, t in enumerate(streamed_tool_calls) if t.id == tc_id)
+                                    idx = next(i for i, t in enumerate(streamed_tool_calls) if t.id == tc_id or t.index == new_tc.index)
                                     streamed_tool_calls[idx] = existing
                                 else:
                                     streamed_tool_calls.append(new_tc)
@@ -1825,7 +1834,7 @@ class LLMNode[B](LeafNode[B]):
                             messages.append({
                                 "role": "tool",
                                 "tool_call_id": tc.id,
-                                "content": str(result),
+                                "content": json.dumps(result),
                             })
                         output = ""
                         cost_reported = False
@@ -1871,7 +1880,7 @@ class LLMNode[B](LeafNode[B]):
                             messages.append({
                                 "role": "tool",
                                 "tool_call_id": tc.id,
-                                "content": str(result),
+                                "content": json.dumps(result),
                             })
                         # Reset output for next iteration
                         output = ""

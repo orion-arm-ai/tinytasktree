@@ -495,7 +495,6 @@ tree = (
 
 `tool_executor` supports sync/async and `tools` accepts `ToolDef` dataclasses (or raw dicts).
 Streaming tool calls are also supported -- deltas are accumulated and executed after the stream completes.
-```
 
 ### Composite Nodes <span id="composite-nodes"></span> <a href="#ref">[↑]</a>
 
