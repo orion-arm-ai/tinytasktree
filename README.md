@@ -832,7 +832,7 @@ tree = (
 )
 
 # To trigger termination from an external script or process:
-await redis.set(f"stop:{job_id}", "1")
+await store.set(f"stop:{job_id}", "1")
 ```
 
 #### Wrapper <span id="wrapper"></span> <a href="#ref">[↑]</a>

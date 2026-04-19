@@ -114,6 +114,26 @@ def test_httpserver_trace_route_still_wins_over_ui_fallback(monkeypatch, tmp_pat
         thread.join()
 
 
+def test_httpserver_trace_route_rejects_invalid_trace_ids(monkeypatch, tmp_path: Path):
+    ui_root = tmp_path / "ui_dist"
+    ui_root.mkdir(parents=True)
+    (ui_root / "index.html").write_text("<html><body>tinytasktree ui</body></html>", encoding="utf-8")
+
+    monkeypatch.setattr(tinytasktree, "_find_bundled_ui_root", lambda: ui_root)
+
+    handler = tinytasktree.create_http_app(str(tmp_path / "traces"))
+    server, thread = _serve(handler)
+    try:
+        status, content_type, body = _request(server, "GET", "/trace/../secret")
+        assert status == 404
+        assert content_type.startswith("application/json")
+        assert "Invalid trace_id" in json.loads(body.decode())["detail"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 def test_httpserver_lists_traces_desc(monkeypatch, tmp_path: Path):
     ui_root = tmp_path / "ui_dist"
     ui_root.mkdir(parents=True)

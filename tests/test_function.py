@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pytest
+
 import tinytasktree
 
 
@@ -115,3 +117,11 @@ async def test_function_exception_results_in_fail():
 
     assert not result.is_ok()
     assert result.data is None
+
+
+async def test_function_with_invalid_parameter_count_fails_at_build_time():
+    def invalid(a, b, c):
+        return None
+
+    with pytest.raises(tinytasktree.TasktreeProgrammingError):
+        _build_tree(invalid)
