@@ -693,7 +693,6 @@ async def test_llm_tool_call_tool_executor_crash(mock_openai):
     )
 
     context = tinytasktree.Context()
-    blackboard = Blackboard(prompt="crash test")
     result = await tree(context)
 
     assert not result.is_ok()
