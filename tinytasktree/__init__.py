@@ -181,6 +181,7 @@ __all__ = (
     "ToolDef",
     "ToolExecutor",
     "ToolFactory",
+    "ToolItem",
     "ToolFunction",
     "ToolFunctionDef",
     "JSONLoader",
@@ -1346,7 +1347,8 @@ class ToolDef:
         )
 
 
-type ToolFactory[B] = Callable[[B], list[ToolDef]]
+type ToolItem = ToolDef | JSON
+type ToolFactory[B] = Callable[[B], list[ToolItem]]
 
 
 def _new_async_openai_client(**kwargs: Any) -> AsyncOpenAI:
@@ -1560,7 +1562,7 @@ class LLMNode[B](LeafNode[B]):
         base_url: str | LLMBaseURLFactory[B] | None = None,
         client_kwargs: dict[str, Any] | None = None,
         extra_body: dict[str, Any] | None = None,
-        tools: list[ToolDef] | ToolFactory[B] | None = None,
+        tools: list[ToolItem] | ToolFactory[B] | None = None,
         tool_executor: ToolExecutor[B] | None = None,
         max_iterations: int = 5,
         **llm_call_kwargs,
@@ -2956,7 +2958,7 @@ class Tree[B](_ForwardingChildNode[B]):
         base_url: str | LLMBaseURLFactory[B] | None = None,
         client_kwargs: dict[str, Any] | None = None,
         extra_body: dict[str, Any] | None = None,
-        tools: list[ToolDef] | ToolFactory[B] | None = None,
+        tools: list[ToolItem] | ToolFactory[B] | None = None,
         tool_executor: ToolExecutor[B] | None = None,
         max_iterations: int = 5,
         **llm_call_kwargs,
