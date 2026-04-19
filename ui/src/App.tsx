@@ -1499,7 +1499,7 @@ function TraceUI() {
                                     title: "Key",
                                     dataIndex: "key",
                                     key: "key",
-                                    width: "35%",
+                                    width: 140,
                                     render: (text: string) => <Text code>{text}</Text>,
                                 },
                                 {
@@ -1519,6 +1519,8 @@ function TraceUI() {
                                     },
                                 },
                             ]}
+                            scroll={{ x: 600 }}
+                            className="attrs-table"
                             locale={{ emptyText: "(empty)" }}
                         />
                     </Card>
