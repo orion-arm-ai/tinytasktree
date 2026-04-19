@@ -1076,3 +1076,107 @@ async def test_llm_streaming_tool_call_indexed_deltas(mock_openai):
     assert executed_calls[0].function.name == "get_weather"
     assert executed_calls[0].function.arguments == '{"loc": "Berlin"}'
     assert executed_calls[0].id == "call_abc"
+
+
+async def test_llm_tool_result_serialized_as_json(mock_openai):
+    """Test that tool results are serialized as valid JSON, not Python repr.
+
+    Before the fix, str(result) produced Python repr (single quotes, True/None)
+    which is not valid JSON. After the fix, json.dumps(result) produces proper
+    JSON that models/gateways can parse reliably.
+    """
+    call_count = 0
+
+    async def handler(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_weather",
+                                        "arguments": '{"location": "Paris"}',
+                                    },
+                                },
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                "_hidden_params": {"response_cost": 0.0},
+            }
+        else:
+            # Verify the second call received valid JSON in tool content
+            second_call_messages = kwargs.get("messages", [])
+            # Find the tool result message
+            tool_msg = next((m for m in second_call_messages if m.get("role") == "tool"), None)
+            assert tool_msg is not None, "tool message not found in second LLM call"
+            content = tool_msg.get("content", "")
+            # Must be valid JSON (parseable by json.loads)
+            import json
+
+            parsed = json.loads(content)
+            assert parsed == {"location": "Paris", "weather": "sunny", "temp": 22}
+            # Must use double quotes (JSON), not single quotes (Python repr)
+            assert '"' in content and "'" not in content
+
+            return {
+                "choices": [
+                    {"message": {"content": "Paris is nice."}, "finish_reason": "stop"},
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+                "_hidden_params": {"response_cost": 0.0},
+            }
+
+    mock_openai(handler=handler)
+
+    def tool_executor(b: Blackboard, tool_call: tinytasktree.ToolCall) -> tinytasktree.JSON:
+        # Return a dict with values that str() would render differently from json.dumps()
+        return {"location": "Paris", "weather": "sunny", "temp": 22}
+
+    tree = (
+        tinytasktree.Tree[Blackboard]("JsonToolResult")
+        .Sequence()
+        ._().LLM(
+            "mock/json-result",
+            make_messages,
+            tools=TOOLS,
+            tool_executor=tool_executor,
+            max_iterations=3,
+        )
+        .End()
+    )
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="Paris weather")
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert result.is_ok()
+    assert result.data == "Paris is nice."
+
+
+async def test_toolcall_index_roundtrip():
+    """Test that ToolCall.index is preserved through to_dict/from_dict."""
+    tc = tinytasktree.ToolCall(
+        id="call_abc",
+        type="function",
+        function=tinytasktree.ToolFunction(name="get_weather", arguments='{"loc": "NY"}'),
+        index=0,
+    )
+    d = tc.to_dict()
+    assert d["index"] == 0
+    tc2 = tinytasktree.ToolCall.from_dict(d)
+    assert tc2.index == 0
+    # Missing index should be None
+    d_no_idx = {k: v for k, v in d.items() if k != "index"}
+    tc3 = tinytasktree.ToolCall.from_dict(d_no_idx)
+    assert tc3.index is None
