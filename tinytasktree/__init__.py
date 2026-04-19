@@ -196,68 +196,6 @@ __all__ = (
 )
 
 
-def _json_loads(data: str | bytes | bytearray) -> Any:
-    if orjson is not None:
-        return orjson.loads(data)
-    if isinstance(data, bytearray):
-        data = bytes(data)
-    return json.loads(data)
-
-
-def _json_dumps(
-    data: Any,
-    *,
-    default: Callable[[Any], Any] | None = None,
-    indent: int | None = None,
-) -> bytes:
-    if orjson is not None:
-        option = orjson.OPT_INDENT_2 if indent == 2 else 0
-        if default is None:
-            return orjson.dumps(data, option=option)
-        return orjson.dumps(data, default=default, option=option)
-    return json.dumps(
-        data,
-        default=default,
-        indent=indent,
-        ensure_ascii=False,
-        separators=(",", ":") if indent is None else None,
-    ).encode("utf-8")
-
-
-def _find_bundled_ui_root() -> Any | None:
-    try:
-        ui_root = importlib.resources.files("tinytasktree").joinpath("ui_dist")
-        if ui_root.joinpath("index.html").is_file():
-            return ui_root
-    except Exception:
-        pass
-
-    local_ui_root = Path(__file__).resolve().parents[1].joinpath("ui", "dist")
-    if local_ui_root.joinpath("index.html").is_file():
-        return local_ui_root
-    return None
-
-
-def _resolve_ui_file(ui_root: Any, request_path: str) -> tuple[Any, str] | None:
-    normalized = request_path.lstrip("/") or "index.html"
-    parts = [part for part in PurePosixPath(normalized).parts if part not in {"", "."}]
-    if any(part == ".." for part in parts):
-        return None
-
-    candidate = ui_root.joinpath(*parts) if parts else ui_root.joinpath("index.html")
-    if candidate.is_file():
-        content_type = mimetypes.guess_type(str(PurePosixPath(*parts)) if parts else "index.html")[0]
-        return candidate, content_type or "application/octet-stream"
-
-    if parts and any("." in part for part in parts):
-        return None
-
-    index_file = ui_root.joinpath("index.html")
-    if index_file.is_file():
-        return index_file, "text/html; charset=utf-8"
-    return None
-
-
 ##############
 # Common Types
 ##############
@@ -267,11 +205,8 @@ type JSON = dict[str, Any]
 
 class CacheStore(Protocol):
     async def get(self, key: str) -> Any: ...
-
     async def set(self, key: str, value: Any, ex: int | float | timedelta | None = None) -> Any: ...
-
     async def delete(self, key: str) -> Any: ...
-
     async def exists(self, key: str) -> Any: ...
 
 
@@ -1472,7 +1407,9 @@ class LLMNode[B](LeafNode[B]):
         return model_input, None, 0.0, 0.0, {}, {}, {}
 
     @staticmethod
-    def _compute_priced_cost(tokens: dict[str, int] | None, input_price_per_m: float, output_price_per_m: float) -> float | None:
+    def _compute_priced_cost(
+        tokens: dict[str, int] | None, input_price_per_m: float, output_price_per_m: float
+    ) -> float | None:
         if not tokens:
             return None
         prompt_tokens = tokens.get("prompt")
@@ -1607,9 +1544,15 @@ class LLMNode[B](LeafNode[B]):
     async def _impl(self, context: Context, tracer: Tracer) -> Result:
         b = cast(B, context._current_blackboard())
         model_input = self._model(b) if callable(self._model) else self._model
-        model, provider, input_price_per_m, output_price_per_m, model_client_kwargs, model_extra_body, model_llm_call_kwargs = (
-            self._resolve_model_input(model_input)
-        )
+        (
+            model,
+            provider,
+            input_price_per_m,
+            output_price_per_m,
+            model_client_kwargs,
+            model_extra_body,
+            model_llm_call_kwargs,
+        ) = self._resolve_model_input(model_input)
         messages = self._messages(b) if callable(self._messages) else self._messages
         stream = self._stream(b) if callable(self._stream) else self._stream
         merged_client_kwargs = self._merge_llm_call_kwargs(
@@ -3570,6 +3513,68 @@ else:
     handler.setFormatter(ColorFormatter("[%(levelname)s] %(asctime)s %(message)s"))
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
+
+
+def _json_loads(data: str | bytes | bytearray) -> Any:
+    if orjson is not None:
+        return orjson.loads(data)
+    if isinstance(data, bytearray):
+        data = bytes(data)
+    return json.loads(data)
+
+
+def _json_dumps(
+    data: Any,
+    *,
+    default: Callable[[Any], Any] | None = None,
+    indent: int | None = None,
+) -> bytes:
+    if orjson is not None:
+        option = orjson.OPT_INDENT_2 if indent == 2 else 0
+        if default is None:
+            return orjson.dumps(data, option=option)
+        return orjson.dumps(data, default=default, option=option)
+    return json.dumps(
+        data,
+        default=default,
+        indent=indent,
+        ensure_ascii=False,
+        separators=(",", ":") if indent is None else None,
+    ).encode("utf-8")
+
+
+def _find_bundled_ui_root() -> Any | None:
+    try:
+        ui_root = importlib.resources.files("tinytasktree").joinpath("ui_dist")
+        if ui_root.joinpath("index.html").is_file():
+            return ui_root
+    except Exception:
+        pass
+
+    local_ui_root = Path(__file__).resolve().parents[1].joinpath("ui", "dist")
+    if local_ui_root.joinpath("index.html").is_file():
+        return local_ui_root
+    return None
+
+
+def _resolve_ui_file(ui_root: Any, request_path: str) -> tuple[Any, str] | None:
+    normalized = request_path.lstrip("/") or "index.html"
+    parts = [part for part in PurePosixPath(normalized).parts if part not in {"", "."}]
+    if any(part == ".." for part in parts):
+        return None
+
+    candidate = ui_root.joinpath(*parts) if parts else ui_root.joinpath("index.html")
+    if candidate.is_file():
+        content_type = mimetypes.guess_type(str(PurePosixPath(*parts)) if parts else "index.html")[0]
+        return candidate, content_type or "application/octet-stream"
+
+    if parts and any("." in part for part in parts):
+        return None
+
+    index_file = ui_root.joinpath("index.html")
+    if index_file.is_file():
+        return index_file, "text/html; charset=utf-8"
+    return None
 
 
 ################
