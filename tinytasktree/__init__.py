@@ -1776,6 +1776,7 @@ class LLMNode[B](LeafNode[B]):
                             tokens=tokens,
                             input_price_per_m=input_price_per_m,
                             output_price_per_m=output_price_per_m,
+                            response=response,
                             usage=usage,
                             cost_reported=cost_reported,
                         )
@@ -1839,7 +1840,8 @@ class LLMNode[B](LeafNode[B]):
                                 "content": json.dumps(result),
                             })
                         output = ""
-                        cost_reported = False
+                        if iteration < self._max_iterations:
+                            cost_reported = False
                         continue
                 else:
                     choice = self._first_choice(response)
@@ -1886,7 +1888,8 @@ class LLMNode[B](LeafNode[B]):
                             })
                         # Reset output for next iteration
                         output = ""
-                        cost_reported = False
+                        if iteration < self._max_iterations:
+                            cost_reported = False
                         continue
 
             finally:

@@ -849,6 +849,123 @@ async def test_llm_tool_call_cost_accumulation(mock_openai):
     )
 
 
+
+async def test_llm_tool_call_cost_no_double_count_at_max_iterations(mock_openai):
+    """Test that cost is not double-counted when max_iterations is reached.
+
+    Regression test: when all iterations have tool calls and max_iterations
+    is reached, the final fallback must not re-record the last iteration's cost.
+    """
+    call_count = 0
+
+    async def handler(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        # Every call returns tool_calls to force max_iterations
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "loop_tool", "arguments": "{}"},
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            "_hidden_params": {"response_cost": 0.1},
+        }
+
+    mock_openai(handler=handler)
+
+    def tool_executor(b: Blackboard, tool_call: tinytasktree.ToolCall) -> tinytasktree.JSON:
+        return {"result": "ok"}
+
+    tree = (
+        tinytasktree.Tree[Blackboard]("MaxIterCost")
+        .Sequence()
+        ._().LLM(
+            "mock/loop",
+            make_messages,
+            tools=TOOLS,
+            tool_executor=tool_executor,
+            max_iterations=3,
+        )
+        .End()
+    )
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="max iter cost test")
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert result.is_ok()
+    assert call_count == 3
+
+    # 3 iterations × $0.10 = $0.30, NOT $0.40 (which would indicate double-counting)
+    trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
+    expected = 0.1 * 3
+    assert trace.cost == pytest.approx(expected), (
+        f"Cost should be {expected} (3 × 0.1), got {trace.cost}"
+    )
+
+
+async def test_llm_streaming_cost_with_priced_model(mock_openai):
+    """Test that streaming mode correctly computes cost via model pricing.
+
+    In streaming mode, _hidden_params.response_cost is not available on
+    individual chunks. The code should fall back to priced cost computation
+    when the model has input/output pricing set.
+    """
+    async def handler(**kwargs):
+        async def gen():
+            yield {
+                "choices": [{"delta": {"content": "streamed"}, "finish_reason": None}],
+            }
+            yield {
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+            }
+        return gen()
+
+    mock_openai(handler=handler)
+
+    provider = tinytasktree.LLMProvider(base_url="https://provider.example/v1")
+    model = tinytasktree.LLMModel(
+        "provider/stream-model",
+        provider=provider,
+        input_price_per_m=0.5,
+        output_price_per_m=1.5,
+    )
+
+    tree = (
+        tinytasktree.Tree[Blackboard]("StreamingPricedCost")
+        .Sequence()
+        ._().LLM(model, make_messages, stream=True)
+        .End()
+    )
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="streaming cost")
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert result.is_ok()
+
+    trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
+    # (100 / 1_000_000) * 0.5 + (50 / 1_000_000) * 1.5
+    expected = (100 / 1_000_000) * 0.5 + (50 / 1_000_000) * 1.5
+    assert trace.cost == pytest.approx(expected), (
+        f"Streaming cost should be {expected}, got {trace.cost}"
+    )
+
+
 def test_obj_get_model_dump_safety():
     """Test that _obj_get handles model_dump() returning non-dict safely.
 
