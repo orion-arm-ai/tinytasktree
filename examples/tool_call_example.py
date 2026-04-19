@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")
 
 from dataclasses import dataclass
 
-from tinytasktree import JSON, Context, FileTraceStorageHandler, LLMModel, LLMProvider, ToolCall, Tree
+from tinytasktree import JSON, Context, FileTraceStorageHandler, LLMModel, LLMProvider, ToolCall, ToolDef, ToolFunctionDef, Tree
 
 # Requirements:
 #   - LLM_BASE_URL and LLM_API_KEY set for your LLM service
@@ -29,14 +29,14 @@ class Blackboard:
     weather: JSON | None = None
 
 
-# Define tools in OpenAI format
+# Define tools using dataclasses
 TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get the current weather in a given location",
-            "parameters": {
+    ToolDef(
+        type="function",
+        function=ToolFunctionDef(
+            name="get_weather",
+            description="Get the current weather in a given location",
+            parameters={
                 "type": "object",
                 "properties": {
                     "location": {
@@ -46,8 +46,8 @@ TOOLS = [
                 },
                 "required": ["location"],
             },
-        },
-    },
+        ),
+    ),
 ]
 
 
@@ -57,8 +57,8 @@ def make_messages(b: Blackboard) -> list[JSON]:
 
 def tool_executor(b: Blackboard, tool_call: ToolCall) -> JSON:
     """Execute a tool call and return the result."""
-    tool_name = tool_call["function"]["name"]
-    tool_args = tool_call["function"]["arguments"]
+    tool_name = tool_call.function.name
+    tool_args = tool_call.function.arguments
     print(f"Executing tool: {tool_name}({tool_args})")
 
     # Simulate weather API call

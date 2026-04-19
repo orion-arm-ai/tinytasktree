@@ -19,20 +19,20 @@ def make_messages(b: Blackboard) -> list[tinytasktree.JSON]:
 
 
 TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get the weather for a location",
-            "parameters": {
+    tinytasktree.ToolDef(
+        type="function",
+        function=tinytasktree.ToolFunctionDef(
+            name="get_weather",
+            description="Get the weather for a location",
+            parameters={
                 "type": "object",
                 "properties": {
                     "location": {"type": "string"},
                 },
                 "required": ["location"],
             },
-        },
-    },
+        ),
+    ),
 ]
 
 
@@ -94,7 +94,7 @@ async def test_llm_tool_call_basic(mock_openai):
     tool_results = []
 
     def tool_executor(b: Blackboard, tool_call: tinytasktree.ToolCall) -> tinytasktree.JSON:
-        tool_results.append(tool_call["function"]["name"])
+        tool_results.append(tool_call.function.name)
         return {"location": "Beijing", "weather": "sunny", "temperature": 25}
 
     tree = (
@@ -270,7 +270,7 @@ async def test_llm_tool_call_max_iterations(mock_openai):
     tool_results = []
 
     def tool_executor(b: Blackboard, tool_call: tinytasktree.ToolCall) -> tinytasktree.JSON:
-        tool_results.append(tool_call["function"]["name"])
+        tool_results.append(tool_call.function.name)
         return {"status": "ok"}
 
     tree = (
@@ -369,7 +369,7 @@ async def test_llm_tool_call_multiple_tools_in_one_response(mock_openai):
     tool_results = []
 
     def tool_executor(b: Blackboard, tool_call: tinytasktree.ToolCall) -> tinytasktree.JSON:
-        tool_results.append(tool_call["function"]["arguments"])
+        tool_results.append(tool_call.function.arguments)
         return {"weather": "hot"}
 
     tree = (

@@ -137,7 +137,7 @@ import threading
 import uuid
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import date, datetime, timedelta
 from enum import Enum, IntEnum
 from http import HTTPStatus
@@ -181,6 +181,8 @@ __all__ = (
     "ToolDef",
     "ToolExecutor",
     "ToolFactory",
+    "ToolFunction",
+    "ToolFunctionDef",
     "JSONLoader",
     "Result",
     "Status",
@@ -1266,16 +1268,82 @@ type LLMStreamOnChunkCallback[B] = (
 )
 
 
-# Tool call from LLM response (OpenAI format)
-type ToolCall = dict[str, Any]
+# Tool call from LLM response
+@dataclass
+class ToolFunction:
+    name: str = ""
+    arguments: str = ""
+
+
+@dataclass
+class ToolCall:
+    id: str = ""
+    type: str = "function"
+    function: ToolFunction = field(default_factory=ToolFunction)
+
+    def to_dict(self) -> JSON:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "ToolCall":
+        func_data = data.get("function", {}) if isinstance(data, dict) else {}
+        if isinstance(func_data, ToolFunction):
+            func = func_data
+        elif isinstance(func_data, dict):
+            func = ToolFunction(
+                name=func_data.get("name", ""),
+                arguments=func_data.get("arguments", ""),
+            )
+        else:
+            func = ToolFunction()
+        return cls(
+            id=data.get("id", "") if isinstance(data, dict) else "",
+            type=data.get("type", "function") if isinstance(data, dict) else "function",
+            function=func,
+        )
+
 
 # [async] function(blackboard, tool_call) -> JSON result
 type ToolExecutor1[B] = Callable[[B, ToolCall], Awaitable[JSON]]
 type ToolExecutor2[B] = Callable[[B, ToolCall], JSON]
 type ToolExecutor[B] = ToolExecutor1[B] | ToolExecutor2[B]
 
+
 # tool def (OpenAI format) or factory function
-type ToolDef = dict[str, Any]
+@dataclass
+class ToolFunctionDef:
+    name: str = ""
+    description: str = ""
+    parameters: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ToolDef:
+    type: str = "function"
+    function: ToolFunctionDef = field(default_factory=ToolFunctionDef)
+
+    def to_dict(self) -> JSON:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "ToolDef":
+        func_data = data.get("function", {}) if isinstance(data, dict) else {}
+        if isinstance(func_data, ToolFunctionDef):
+            func = func_data
+        elif isinstance(func_data, dict):
+            func = ToolFunctionDef(
+                name=func_data.get("name", ""),
+                description=func_data.get("description", ""),
+                parameters=func_data.get("parameters", {}),
+            )
+        else:
+            func = ToolFunctionDef()
+        return cls(
+            type=data.get("type", "function") if isinstance(data, dict) else "function",
+            function=func,
+        )
+
+
 type ToolFactory[B] = Callable[[B], list[ToolDef]]
 
 
@@ -1590,9 +1658,9 @@ class LLMNode[B](LeafNode[B]):
         """Execute tool calls and return results."""
         results: list[JSON] = []
         for tc in tool_calls:
-            tool_id = self._obj_get(tc, "id", "")
-            tool_func = self._obj_get(self._obj_get(tc, "function"), "name", "unknown")
-            tool_args = self._obj_get(self._obj_get(tc, "function"), "arguments", "{}")
+            tool_id = tc.id
+            tool_func = tc.function.name or "unknown"
+            tool_args = tc.function.arguments or "{}"
             tracer.log(f"executing tool: {tool_func}({tool_args})")
             if self._tool_executor:
                 if self._is_tool_executor_async:
@@ -1674,7 +1742,7 @@ class LLMNode[B](LeafNode[B]):
                 tracer.update_attributes(api_key="***")
             request_kwargs.update({"model": request_model, "messages": messages, "stream": stream})
             if tools is not None:
-                request_kwargs["tools"] = tools
+                request_kwargs["tools"] = [t.to_dict() if isinstance(t, ToolDef) else t for t in tools]
 
             tracer.update_attributes(model=model)
             tracer.update_attributes(messages=messages)
@@ -1723,17 +1791,20 @@ class LLMNode[B](LeafNode[B]):
                         # Accumulate tool_calls from streaming deltas
                         delta_tool_calls = self._obj_get(delta, "tool_calls")
                         if delta_tool_calls:
-                            for new_tc in delta_tool_calls:
-                                tc_id = self._obj_get(new_tc, "id")
-                                existing = next((t for t in streamed_tool_calls if self._obj_get(t, "id") == tc_id), None)
+                            for new_tc_raw in delta_tool_calls:
+                                new_tc = ToolCall.from_dict(new_tc_raw)
+                                tc_id = new_tc.id
+                                existing = next((t for t in streamed_tool_calls if t.id == tc_id), None)
                                 if existing:
-                                    existing_func = self._obj_get(existing, "function", {}) or {}
-                                    new_func = self._obj_get(new_tc, "function", {}) or {}
-                                    existing_func["name"] = new_func.get("name", existing_func.get("name"))
-                                    existing["function"] = existing_func
-                                    existing_args = self._obj_get(existing, "function", {}).get("arguments", "")
-                                    new_args = self._obj_get(new_tc, "function", {}).get("arguments", "")
-                                    existing["function"]["arguments"] = existing_args + new_args
+                                    existing = replace(
+                                        existing,
+                                        function=ToolFunction(
+                                            name=new_tc.function.name or existing.function.name,
+                                            arguments=existing.function.arguments + new_tc.function.arguments,
+                                        ),
+                                    )
+                                    idx = next(i for i, t in enumerate(streamed_tool_calls) if t.id == tc_id)
+                                    streamed_tool_calls[idx] = existing
                                 else:
                                     streamed_tool_calls.append(new_tc)
 
@@ -1747,14 +1818,13 @@ class LLMNode[B](LeafNode[B]):
                         assistant_msg = {
                             "role": "assistant",
                             "content": output if output else None,
-                            "tool_calls": streamed_tool_calls,
+                            "tool_calls": [tc.to_dict() for tc in streamed_tool_calls],
                         }
                         messages.append(assistant_msg)
                         for tc, result in zip(streamed_tool_calls, results):
-                            tool_id = self._obj_get(tc, "id", "")
                             messages.append({
                                 "role": "tool",
-                                "tool_call_id": tool_id,
+                                "tool_call_id": tc.id,
                                 "content": str(result),
                             })
                         output = ""
@@ -1783,24 +1853,24 @@ class LLMNode[B](LeafNode[B]):
 
                     # Check for tool_calls (OpenAI format: inside message)
                     message = self._obj_get(choice, "message")
-                    tool_calls = self._obj_get(message, "tool_calls")
-                    tracer.update_attributes(tool_calls=tool_calls is not None)
-                    if tool_calls and self._tool_executor:
+                    raw_tool_calls = self._obj_get(message, "tool_calls")
+                    tracer.update_attributes(tool_calls=raw_tool_calls is not None)
+                    if raw_tool_calls and self._tool_executor:
+                        tool_calls = [ToolCall.from_dict(tc) for tc in raw_tool_calls]
                         tracer.log(f"received {len(tool_calls)} tool_calls")
                         results = await self._execute_tool_calls(b, tool_calls, tracer)
                         # Append assistant message with tool_calls
                         assistant_msg = {
                             "role": "assistant",
                             "content": output if output else None,
-                            "tool_calls": tool_calls,
+                            "tool_calls": [tc.to_dict() for tc in tool_calls],
                         }
                         messages.append(assistant_msg)
                         # Append tool results
                         for tc, result in zip(tool_calls, results):
-                            tool_id = self._obj_get(tc, "id", "")
                             messages.append({
                                 "role": "tool",
-                                "tool_call_id": tool_id,
+                                "tool_call_id": tc.id,
                                 "content": str(result),
                             })
                         # Reset output for next iteration
