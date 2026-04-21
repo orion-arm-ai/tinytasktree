@@ -123,7 +123,7 @@ async def test_llm_tool_call_basic(mock_openai):
 
 
 async def test_llm_no_tool_executor(mock_openai):
-    """Test that when LLM returns tool_calls but no tool_executor is set, output is returned."""
+    """Test that tool_calls without an executor fail clearly."""
     call_count = 0
 
     async def handler(**kwargs):
@@ -174,8 +174,23 @@ async def test_llm_no_tool_executor(mock_openai):
     async with context.using_blackboard(blackboard):
         result = await tree(context)
 
-    assert result.is_ok()
+    assert not result.is_ok()
     assert call_count == 1
+    trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
+    assert trace.result is not None
+    assert trace.result.data == {
+        "reason": "tool_calls_without_executor",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": '{"location": "Shanghai"}'},
+                "index": None,
+            }
+        ],
+        "iteration": 1,
+        "max_iterations": 5,
+    }
 
 
 async def test_llm_tool_call_async_executor(mock_openai):
@@ -240,7 +255,7 @@ async def test_llm_tool_call_async_executor(mock_openai):
 
 
 async def test_llm_tool_call_max_iterations(mock_openai):
-    """Test that max_iterations limits the tool call loop."""
+    """Test that max_iterations fails when the loop still needs another LLM turn."""
     call_count = 0
 
     async def handler(**kwargs):
@@ -285,9 +300,24 @@ async def test_llm_tool_call_max_iterations(mock_openai):
     async with context.using_blackboard(blackboard):
         result = await tree(context)
 
-    assert result.is_ok()
+    assert not result.is_ok()
     assert call_count == 3
-    assert len(tool_results) == 3
+    assert len(tool_results) == 2
+    trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
+    assert trace.result is not None
+    assert trace.result.data == {
+        "reason": "max_iterations_reached",
+        "tool_calls": [
+            {
+                "id": "call_3",
+                "type": "function",
+                "function": {"name": "loop_tool", "arguments": "{}"},
+                "index": None,
+            }
+        ],
+        "iteration": 3,
+        "max_iterations": 3,
+    }
 
 
 async def test_llm_tool_call_factory(mock_openai):
@@ -464,25 +494,36 @@ async def test_llm_tool_call_no_tools_provided(mock_openai):
 
 async def test_llm_tool_call_tracer_records_details(mock_openai):
     """Test that tracer records tool execution details."""
+    call_count = 0
 
     async def handler(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_x",
+                                    "type": "function",
+                                    "function": {"name": "test_tool", "arguments": '{"x": 1}'},
+                                },
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                "_hidden_params": {"response_cost": 0.0},
+            }
         return {
             "choices": [
-                {
-                    "message": {
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": "call_x",
-                                "type": "function",
-                                "function": {"name": "test_tool", "arguments": '{"x": 1}'},
-                            },
-                        ],
-                    },
-                    "finish_reason": "tool_calls",
-                }
+                {"message": {"content": "done"}, "finish_reason": "stop"},
             ],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            "usage": {"prompt_tokens": 20, "completion_tokens": 2, "total_tokens": 22},
             "_hidden_params": {"response_cost": 0.0},
         }
 
@@ -571,24 +612,42 @@ async def test_llm_tool_call_iteration_count(mock_openai):
 
 async def test_llm_tool_call_error_result(mock_openai):
     """Test that tool execution error results are fed back to LLM."""
+    call_count = 0
+
     async def handler(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_err",
+                                    "type": "function",
+                                    "function": {"name": "fail_tool", "arguments": "{}"},
+                                },
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                "_hidden_params": {"response_cost": 0.0},
+            }
+
+        import json
+
+        tool_msg = next((m for m in kwargs["messages"] if m.get("role") == "tool"), None)
+        assert tool_msg is not None
+        assert json.loads(tool_msg["content"]) == {"error": "tool failed", "code": 500}
         return {
             "choices": [
-                {
-                    "message": {
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": "call_err",
-                                "type": "function",
-                                "function": {"name": "fail_tool", "arguments": "{}"},
-                            },
-                        ],
-                    },
-                    "finish_reason": "tool_calls",
-                }
+                {"message": {"content": "The tool failed."}, "finish_reason": "stop"},
             ],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            "usage": {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16},
             "_hidden_params": {"response_cost": 0.0},
         }
 
@@ -610,29 +669,46 @@ async def test_llm_tool_call_error_result(mock_openai):
         result = await tree(context)
 
     assert result.is_ok()
-    assert result.data is not None
+    assert result.data == "The tool failed."
+    assert call_count == 2
 
 
 async def test_llm_tool_call_with_content_and_tool_calls(mock_openai):
     """Test that LLM can return both content text AND tool_calls."""
+    call_count = 0
+
     async def handler(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "Let me check the weather for you.",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "get_weather", "arguments": '{"location": "Tokyo"}'},
+                                },
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                "_hidden_params": {"response_cost": 0.0},
+            }
+
+        assistant_msg = next((m for m in kwargs["messages"] if m.get("role") == "assistant"), None)
+        assert assistant_msg is not None
+        assert assistant_msg["content"] == "Let me check the weather for you."
         return {
             "choices": [
-                {
-                    "message": {
-                        "content": "Let me check the weather for you.",
-                        "tool_calls": [
-                            {
-                                "id": "call_1",
-                                "type": "function",
-                                "function": {"name": "get_weather", "arguments": '{"location": "Tokyo"}'},
-                            },
-                        ],
-                    },
-                    "finish_reason": "tool_calls",
-                }
+                {"message": {"content": "Tokyo is rainy."}, "finish_reason": "stop"},
             ],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            "usage": {"prompt_tokens": 20, "completion_tokens": 6, "total_tokens": 26},
             "_hidden_params": {"response_cost": 0.0},
         }
 
@@ -654,7 +730,8 @@ async def test_llm_tool_call_with_content_and_tool_calls(mock_openai):
         result = await tree(context)
 
     assert result.is_ok()
-    assert result.data is not None
+    assert result.data == "Tokyo is rainy."
+    assert call_count == 2
 
 
 async def test_llm_tool_call_tool_executor_crash(mock_openai):
@@ -748,9 +825,11 @@ async def test_llm_tool_call_stream_with_tool_calls(mock_openai):
 
     mock_openai(handler=stream_handler)
     streamed_chunks = []
+    stream_events = []
 
     def stream_callback(b: Blackboard, full: str, delta: str, finished: bool) -> None:
         streamed_chunks.append(delta)
+        stream_events.append((delta, finished))
 
     def tool_executor(b: Blackboard, tool_call: tinytasktree.ToolCall) -> tinytasktree.JSON:
         return {"city": "NYC", "temp": 22}
@@ -777,6 +856,221 @@ async def test_llm_tool_call_stream_with_tool_calls(mock_openai):
     assert result.is_ok()
     assert call_count == 2
     assert "NYC is warm." in "".join(streamed_chunks)
+    assert sum(1 for _, finished in stream_events if finished) == 1
+    assert stream_events[-1] == ("", True)
+    assert all(not finished for _, finished in stream_events[:-1])
+
+
+async def test_llm_tool_call_stream_without_executor_finishes_once(mock_openai):
+    """Test that streaming tool_calls without an executor fail and finalize once."""
+    call_count = 0
+
+    async def stream_handler(**kwargs):
+        nonlocal call_count
+        call_count += 1
+
+        async def gen():
+            yield {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "get_weather", "arguments": '{"loc": "LA"}'},
+                                },
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            }
+
+        return gen()
+
+    mock_openai(handler=stream_handler)
+    stream_events = []
+
+    def stream_callback(b: Blackboard, full: str, delta: str, finished: bool, reason: str) -> None:
+        stream_events.append((full, delta, finished, reason))
+
+    tree = (
+        tinytasktree.Tree[Blackboard]("StreamNoExecutor")
+        .Sequence()
+        ._().LLM(
+            "mock/stream-no-executor",
+            make_messages,
+            stream=True,
+            tools=TOOLS,
+            stream_on_delta=stream_callback,
+        )
+        .End()
+    )
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="streaming without executor")
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert not result.is_ok()
+    assert call_count == 1
+    trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
+    assert trace.result is not None
+    assert trace.result.data["reason"] == "tool_calls_without_executor"
+    assert sum(1 for *_, finished, _ in stream_events if finished) == 1
+    assert stream_events[-1] == ("", "", True, "tool_calls")
+    assert all(not finished for *_, finished, _ in stream_events[:-1])
+
+
+async def test_llm_tool_call_stream_max_iterations_finishes_once(mock_openai):
+    """Test that streaming max_iterations failure still finalizes exactly once."""
+    call_count = 0
+
+    async def stream_handler(**kwargs):
+        nonlocal call_count
+        call_count += 1
+
+        async def gen():
+            yield {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "id": f"call_{call_count}",
+                                    "type": "function",
+                                    "function": {"name": "loop_tool", "arguments": "{}"},
+                                },
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            }
+
+        return gen()
+
+    mock_openai(handler=stream_handler)
+    stream_events = []
+
+    def stream_callback(b: Blackboard, full: str, delta: str, finished: bool, reason: str) -> None:
+        stream_events.append((full, delta, finished, reason))
+
+    def tool_executor(b: Blackboard, tool_call: tinytasktree.ToolCall) -> tinytasktree.JSON:
+        return {"status": "ok"}
+
+    tree = (
+        tinytasktree.Tree[Blackboard]("StreamMaxIterations")
+        .Sequence()
+        ._().LLM(
+            "mock/stream-max-iter",
+            make_messages,
+            stream=True,
+            tools=TOOLS,
+            tool_executor=tool_executor,
+            stream_on_delta=stream_callback,
+            max_iterations=2,
+        )
+        .End()
+    )
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="streaming max iterations")
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert not result.is_ok()
+    assert call_count == 2
+    trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
+    assert trace.result is not None
+    assert trace.result.data["reason"] == "max_iterations_reached"
+    assert sum(1 for *_, finished, _ in stream_events if finished) == 1
+    assert stream_events[-1] == ("", "", True, "tool_calls")
+    assert all(not finished for *_, finished, _ in stream_events[:-1])
+
+
+async def test_llm_tool_call_stream_callback_reason_resets_per_iteration(mock_openai):
+    """Test that 5-arg stream callbacks do not leak prior iteration finish_reason."""
+    call_count = 0
+
+    async def stream_handler(**kwargs):
+        nonlocal call_count
+        call_count += 1
+
+        if call_count == 1:
+            async def gen():
+                yield {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {"name": "get_weather", "arguments": '{"loc": "SF"}'},
+                                    },
+                                ]
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                }
+
+            return gen()
+
+        async def gen():
+            yield {
+                "choices": [
+                    {"delta": {"content": "done"}, "finish_reason": None},
+                ],
+            }
+            yield {
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 2, "total_tokens": 22},
+            }
+
+        return gen()
+
+    mock_openai(handler=stream_handler)
+    stream_events = []
+
+    async def stream_callback(b: Blackboard, full: str, delta: str, finished: bool, reason: str) -> None:
+        stream_events.append((full, delta, finished, reason))
+
+    def tool_executor(b: Blackboard, tool_call: tinytasktree.ToolCall) -> tinytasktree.JSON:
+        return {"city": "SF", "temp": 18}
+
+    tree = (
+        tinytasktree.Tree[Blackboard]("StreamReasonReset")
+        .Sequence()
+        ._().LLM(
+            "mock/stream-reason-reset",
+            make_messages,
+            stream=True,
+            tools=TOOLS,
+            tool_executor=tool_executor,
+            stream_on_delta=stream_callback,
+        )
+        .End()
+    )
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="stream reason reset")
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert result.is_ok()
+    assert result.data == "done"
+    assert stream_events == [
+        ("", "", False, "tool_calls"),
+        ("done", "done", False, ""),
+        ("done", "", False, "stop"),
+        ("done", "", True, "stop"),
+    ]
 
 
 async def test_llm_tool_call_cost_accumulation(mock_openai):
@@ -905,11 +1199,13 @@ async def test_llm_tool_call_cost_no_double_count_at_max_iterations(mock_openai)
     async with context.using_blackboard(blackboard):
         result = await tree(context)
 
-    assert result.is_ok()
+    assert not result.is_ok()
     assert call_count == 3
+    trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
+    assert trace.result is not None
+    assert trace.result.data["reason"] == "max_iterations_reached"
 
     # 3 iterations × $0.10 = $0.30, NOT $0.40 (which would indicate double-counting)
-    trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
     expected = 0.1 * 3
     assert trace.cost == pytest.approx(expected), (
         f"Cost should be {expected} (3 × 0.1), got {trace.cost}"
@@ -1002,6 +1298,17 @@ def test_obj_get_model_dump_safety():
 
     # None object
     assert node._obj_get(None, "key", "default") == "default"
+
+
+def test_llm_invalid_max_iterations_rejected():
+    """Test that max_iterations must be >= 1."""
+    with pytest.raises(tinytasktree.TasktreeProgrammingError, match="max_iterations must be >= 1"):
+        (
+            tinytasktree.Tree[Blackboard]("InvalidMaxIterations")
+            .Sequence()
+            ._().LLM("mock/invalid", make_messages, max_iterations=0)
+            .End()
+        )
 
 
 # --- Regression tests for fix: messages copy & streaming index merge ---

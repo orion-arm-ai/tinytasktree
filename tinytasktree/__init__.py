@@ -1351,6 +1351,35 @@ type ToolItem = ToolDef | JSON
 type ToolFactory[B] = Callable[[B], list[ToolItem]]
 
 
+@dataclass
+class _LLMRuntimeConfig:
+    model: str
+    messages: list[JSON]
+    stream: bool
+    input_price_per_m: float
+    output_price_per_m: float
+    client_kwargs: dict[str, Any]
+    extra_body: dict[str, Any]
+    llm_call_kwargs: dict[str, Any]
+    api_key: str | None
+    base_url: str | None
+    tools: list[ToolItem] | None
+
+
+@dataclass
+class _LLMExecutionState:
+    output: str = ""
+    finish_reason: str = ""
+    last_tokens: dict[str, int] | None = None
+    cost_reported: bool = False
+
+
+@dataclass(frozen=True)
+class _LLMIterationOutcome:
+    should_continue: bool = False
+    result: Result | None = None
+
+
 def _new_async_openai_client(**kwargs: Any) -> AsyncOpenAI:
     return AsyncOpenAI(**kwargs)
 
@@ -1633,6 +1662,8 @@ class LLMNode[B](LeafNode[B]):
         if callable(self._base_url):
             if self._base_url_params_cnt != 1:
                 raise TasktreeProgrammingError(f"{self.fullname}: base_url factory params count invalid")
+        if self._max_iterations < 1:
+            raise TasktreeProgrammingError(f"{self.fullname}: max_iterations must be >= 1")
 
     async def _call_stream_delta_callback(
         self, b: B, full_output: str, delta_content: str, finished: bool, finish_reason: str
@@ -1677,9 +1708,27 @@ class LLMNode[B](LeafNode[B]):
             tracer.update_attributes(tool_id=tool_id, tool_function=tool_func, tool_result=result)
         return results
 
-    @override
-    async def _impl(self, context: Context, tracer: Tracer) -> Result:
-        b = cast(B, context._current_blackboard())
+    def _tool_call_failure_result(
+        self,
+        *,
+        tool_calls: list[ToolCall],
+        reason: str,
+        iteration: int,
+        output: str,
+        tracer: Tracer,
+    ) -> Result:
+        tracer.update_attributes(tool_calls=True, tool_call_failure=reason)
+        data: JSON = {
+            "reason": reason,
+            "tool_calls": [tc.to_dict() for tc in tool_calls],
+            "iteration": iteration,
+            "max_iterations": self._max_iterations,
+        }
+        if output:
+            data["content"] = output
+        return Result.FAIL(data)
+
+    def _resolve_runtime_config(self, b: B, tracer: Tracer) -> _LLMRuntimeConfig:
         model_input = self._model(b) if callable(self._model) else self._model
         (
             model,
@@ -1691,19 +1740,18 @@ class LLMNode[B](LeafNode[B]):
             model_llm_call_kwargs,
         ) = self._resolve_model_input(model_input)
         messages = self._messages(b) if callable(self._messages) else self._messages
-        messages = list(messages)
         stream = self._stream(b) if callable(self._stream) else self._stream
-        merged_client_kwargs = self._merge_llm_call_kwargs(
+        client_kwargs = self._merge_llm_call_kwargs(
             provider.client_kwargs if provider is not None else None,
             model_client_kwargs,
             self._client_kwargs,
         )
-        merged_extra_body = self._merge_llm_call_kwargs(
+        extra_body = self._merge_llm_call_kwargs(
             provider.extra_body if provider is not None else None,
             model_extra_body,
             self._extra_body,
         )
-        merged_llm_call_kwargs = self._merge_llm_call_kwargs(
+        llm_call_kwargs = self._merge_llm_call_kwargs(
             provider.llm_call_kwargs if provider is not None else None,
             model_llm_call_kwargs,
             self._llm_call_kwargs,
@@ -1714,212 +1762,362 @@ class LLMNode[B](LeafNode[B]):
         base_url = self._resolve_base_url(b)
         if base_url is None and provider is not None:
             base_url = provider.base_url
-
-        # Resolve tools (supports factory function)
         tools = self._tools
         if callable(tools):
             tools = tools(b)
         tracer.update_attributes(tools=tools is not None, max_iterations=self._max_iterations)
+        return _LLMRuntimeConfig(
+            model=model,
+            messages=list(messages),
+            stream=stream,
+            input_price_per_m=input_price_per_m,
+            output_price_per_m=output_price_per_m,
+            client_kwargs=client_kwargs,
+            extra_body=extra_body,
+            llm_call_kwargs=llm_call_kwargs,
+            api_key=api_key,
+            base_url=base_url,
+            tools=tools,
+        )
 
-        output = ""
-        finish_reason: str = ""
-        cost_reported = False
+    def _trace_request(self, tracer: Tracer, runtime: _LLMRuntimeConfig, client_kwargs: dict[str, Any]) -> None:
+        if runtime.api_key is not None:
+            tracer.update_attributes(api_key="***")
+        elif "api_key" in client_kwargs:
+            tracer.update_attributes(api_key="***")
+        tracer.update_attributes(model=runtime.model)
+        tracer.update_attributes(messages=runtime.messages)
+        tracer.update_attributes(stream=runtime.stream)
+        tracer.update_attributes(input_price_per_m=runtime.input_price_per_m)
+        tracer.update_attributes(output_price_per_m=runtime.output_price_per_m)
+        tracer.update_attributes(**runtime.llm_call_kwargs)
+        if runtime.extra_body:
+            tracer.update_attributes(extra_body=runtime.extra_body)
+            if "reasoning" in runtime.extra_body:
+                tracer.update_attributes(reasoning=runtime.extra_body["reasoning"])
+        if runtime.base_url is not None:
+            tracer.update_attributes(base_url=runtime.base_url)
 
-        # Tool call loop
-        iteration = 0
-        while iteration < self._max_iterations:
-            iteration += 1
-            last_tokens: dict[str, int] | None = None
-            tracer.update_attributes(iteration=iteration)
+    def _prepare_request(
+        self,
+        runtime: _LLMRuntimeConfig,
+        tracer: Tracer,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        client_kwargs, request_kwargs, request_model = self._normalize_openai_request(
+            model=runtime.model,
+            client_kwargs=dict(runtime.client_kwargs),
+            api_key=runtime.api_key,
+            base_url=runtime.base_url,
+            stream=runtime.stream,
+            extra_body=runtime.extra_body,
+            llm_call_kwargs=runtime.llm_call_kwargs,
+        )
+        request_kwargs.update(
+            {
+                "model": request_model,
+                "messages": runtime.messages,
+                "stream": runtime.stream,
+            }
+        )
+        if runtime.tools is not None:
+            request_kwargs["tools"] = [t.to_dict() if isinstance(t, ToolDef) else t for t in runtime.tools]
+        self._trace_request(tracer, runtime, client_kwargs)
+        return client_kwargs, request_kwargs
 
-            client_kwargs, request_kwargs, request_model = self._normalize_openai_request(
-                model=model,
-                client_kwargs=merged_client_kwargs,
-                api_key=api_key,
-                base_url=base_url,
-                stream=stream,
-                extra_body=merged_extra_body,
-                llm_call_kwargs=merged_llm_call_kwargs,
+    def _record_usage(
+        self,
+        *,
+        payload: Any,
+        tracer: Tracer,
+        runtime: _LLMRuntimeConfig,
+        state: _LLMExecutionState,
+        response: Any | None = None,
+    ) -> None:
+        usage = self._obj_get(payload, "usage")
+        tokens = self._extract_tokens(usage)
+        state.cost_reported = self._try_record_cost(
+            tracer=tracer,
+            tokens=tokens,
+            input_price_per_m=runtime.input_price_per_m,
+            output_price_per_m=runtime.output_price_per_m,
+            response=response,
+            usage=usage,
+            cost_reported=state.cost_reported,
+        )
+        if tokens is not None:
+            state.last_tokens = tokens
+
+    @staticmethod
+    def _merge_streamed_tool_calls(streamed_tool_calls: list[ToolCall], delta_tool_calls: Any) -> None:
+        if not delta_tool_calls:
+            return
+        for new_tc_raw in delta_tool_calls:
+            new_tc = ToolCall.from_dict(new_tc_raw)
+            tc_id = new_tc.id
+            existing = next((t for t in streamed_tool_calls if t.id == tc_id), None)
+            if existing is None and new_tc.index is not None:
+                existing = next((t for i, t in enumerate(streamed_tool_calls) if i == new_tc.index), None)
+            if existing:
+                existing = replace(
+                    existing,
+                    function=ToolFunction(
+                        name=new_tc.function.name or existing.function.name,
+                        arguments=existing.function.arguments + new_tc.function.arguments,
+                    ),
+                )
+                idx = next(
+                    i
+                    for i, t in enumerate(streamed_tool_calls)
+                    if t.id == tc_id or t.index == new_tc.index
+                )
+                streamed_tool_calls[idx] = existing
+            else:
+                streamed_tool_calls.append(new_tc)
+
+    @staticmethod
+    def _append_tool_messages(
+        messages: list[JSON],
+        tool_calls: list[ToolCall],
+        assistant_output: str,
+        results: list[JSON],
+    ) -> None:
+        messages.append(
+            {
+                "role": "assistant",
+                "content": assistant_output if assistant_output else None,
+                "tool_calls": [tc.to_dict() for tc in tool_calls],
+            }
+        )
+        for tc, result in zip(tool_calls, results):
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(result),
+                }
             )
-            if api_key is not None:
-                tracer.update_attributes(api_key="***")
-            if api_key is None and "api_key" in client_kwargs:
-                tracer.update_attributes(api_key="***")
-            request_kwargs.update({"model": request_model, "messages": messages, "stream": stream})
-            if tools is not None:
-                request_kwargs["tools"] = [t.to_dict() if isinstance(t, ToolDef) else t for t in tools]
 
-            tracer.update_attributes(model=model)
-            tracer.update_attributes(messages=messages)
-            tracer.update_attributes(stream=stream)
-            tracer.update_attributes(input_price_per_m=input_price_per_m)
-            tracer.update_attributes(output_price_per_m=output_price_per_m)
-            tracer.update_attributes(**merged_llm_call_kwargs)
-            if merged_extra_body:
-                tracer.update_attributes(extra_body=merged_extra_body)
-                if "reasoning" in merged_extra_body:
-                    tracer.update_attributes(reasoning=merged_extra_body["reasoning"])
-            if base_url is not None:
-                tracer.update_attributes(base_url=base_url)
+    async def _handle_tool_calls(
+        self,
+        *,
+        b: B,
+        tracer: Tracer,
+        runtime: _LLMRuntimeConfig,
+        state: _LLMExecutionState,
+        tool_calls: list[ToolCall],
+        iteration: int,
+    ) -> _LLMIterationOutcome:
+        tracer.update_attributes(tool_calls=True)
+        if self._tool_executor is None:
+            if runtime.stream:
+                await self._call_stream_delta_callback(b, state.output, "", True, state.finish_reason)
+            return _LLMIterationOutcome(
+                result=self._tool_call_failure_result(
+                    tool_calls=tool_calls,
+                    reason="tool_calls_without_executor",
+                    iteration=iteration,
+                    output=state.output,
+                    tracer=tracer,
+                )
+            )
+        if iteration >= self._max_iterations:
+            if runtime.stream:
+                await self._call_stream_delta_callback(b, state.output, "", True, state.finish_reason)
+            return _LLMIterationOutcome(
+                result=self._tool_call_failure_result(
+                    tool_calls=tool_calls,
+                    reason="max_iterations_reached",
+                    iteration=iteration,
+                    output=state.output,
+                    tracer=tracer,
+                )
+            )
+        tracer.log(f"received {len(tool_calls)} tool_calls")
+        results = await self._execute_tool_calls(b, tool_calls, tracer)
+        self._append_tool_messages(runtime.messages, tool_calls, state.output, results)
+        state.output = ""
+        state.cost_reported = False
+        return _LLMIterationOutcome(should_continue=True)
 
-            client = _new_async_openai_client(**client_kwargs)
-            try:
-                response = await client.chat.completions.create(**request_kwargs)
-
-                if stream:
-                    streamed_tool_calls: list[ToolCall] = []
-                    async for chunk in response:
-                        usage = self._obj_get(chunk, "usage")
-                        tokens = self._extract_tokens(usage)
-                        cost_reported = self._try_record_cost(
-                            tracer=tracer,
-                            tokens=tokens,
-                            input_price_per_m=input_price_per_m,
-                            output_price_per_m=output_price_per_m,
-                            response=response,
-                            usage=usage,
-                            cost_reported=cost_reported,
-                        )
-                        if tokens is not None:
-                            last_tokens = tokens
-
-                        choice = self._first_choice(chunk)
-                        if choice is None:
-                            continue
-
-                        delta = self._obj_get(choice, "delta")
-                        delta_content = self._content_to_text(self._obj_get(delta, "content"))
-                        output += delta_content
-                        fr = self._obj_get(choice, "finish_reason")
-                        if fr is not None:
-                            finish_reason = str(fr)
-
-                        # Accumulate tool_calls from streaming deltas
-                        delta_tool_calls = self._obj_get(delta, "tool_calls")
-                        if delta_tool_calls:
-                            for new_tc_raw in delta_tool_calls:
-                                new_tc = ToolCall.from_dict(new_tc_raw)
-                                tc_id = new_tc.id
-                                # Try matching by id first, then by index (for deltas without id)
-                                existing = next((t for t in streamed_tool_calls if t.id == tc_id), None)
-                                if existing is None and new_tc.index is not None:
-                                    existing = next(
-                                        (t for i, t in enumerate(streamed_tool_calls) if i == new_tc.index),
-                                        None,
-                                    )
-                                if existing:
-                                    existing = replace(
-                                        existing,
-                                        function=ToolFunction(
-                                            name=new_tc.function.name or existing.function.name,
-                                            arguments=existing.function.arguments + new_tc.function.arguments,
-                                        ),
-                                    )
-                                    idx = next(i for i, t in enumerate(streamed_tool_calls) if t.id == tc_id or t.index == new_tc.index)
-                                    streamed_tool_calls[idx] = existing
-                                else:
-                                    streamed_tool_calls.append(new_tc)
-
-                        await self._call_stream_delta_callback(b, output, delta_content, False, finish_reason)
-                    await self._call_stream_delta_callback(b, output, "", True, finish_reason)
-
-                    # Handle tool_calls after streaming completes
-                    if streamed_tool_calls and self._tool_executor:
-                        tracer.log(f"received {len(streamed_tool_calls)} tool_calls from stream")
-                        results = await self._execute_tool_calls(b, streamed_tool_calls, tracer)
-                        assistant_msg = {
-                            "role": "assistant",
-                            "content": output if output else None,
-                            "tool_calls": [tc.to_dict() for tc in streamed_tool_calls],
-                        }
-                        messages.append(assistant_msg)
-                        for tc, result in zip(streamed_tool_calls, results):
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc.id,
-                                "content": json.dumps(result),
-                            })
-                        output = ""
-                        if iteration < self._max_iterations:
-                            cost_reported = False
-                        continue
-                else:
-                    choice = self._first_choice(response)
-                    if choice is not None:
-                        message = self._obj_get(choice, "message")
-                        output = self._content_to_text(self._obj_get(message, "content"))
-                        fr = self._obj_get(choice, "finish_reason")
-                        if fr is not None:
-                            finish_reason = str(fr)
-
-                    usage = self._obj_get(response, "usage")
-                    last_tokens = self._extract_tokens(usage)
-                    cost_reported = self._try_record_cost(
-                        tracer=tracer,
-                        tokens=last_tokens,
-                        input_price_per_m=input_price_per_m,
-                        output_price_per_m=output_price_per_m,
-                        response=response,
-                        usage=usage,
-                        cost_reported=cost_reported,
-                    )
-
-                    # Check for tool_calls (OpenAI format: inside message)
-                    message = self._obj_get(choice, "message")
-                    raw_tool_calls = self._obj_get(message, "tool_calls")
-                    tracer.update_attributes(tool_calls=raw_tool_calls is not None)
-                    if raw_tool_calls and self._tool_executor:
-                        tool_calls = [ToolCall.from_dict(tc) for tc in raw_tool_calls]
-                        tracer.log(f"received {len(tool_calls)} tool_calls")
-                        results = await self._execute_tool_calls(b, tool_calls, tracer)
-                        # Append assistant message with tool_calls
-                        assistant_msg = {
-                            "role": "assistant",
-                            "content": output if output else None,
-                            "tool_calls": [tc.to_dict() for tc in tool_calls],
-                        }
-                        messages.append(assistant_msg)
-                        # Append tool results
-                        for tc, result in zip(tool_calls, results):
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc.id,
-                                "content": json.dumps(result),
-                            })
-                        # Reset output for next iteration
-                        output = ""
-                        if iteration < self._max_iterations:
-                            cost_reported = False
-                        continue
-
-            finally:
-                await _close_openai_client(client)
-
-            # If no tool_calls or no tool_executor, break
-            break
-
-        tracer.update_attributes(output=output)
-        tracer.update_attributes(finish_reason=finish_reason)
-        if last_tokens is None:
-            last_tokens = self._compute_tokens(model, messages, output)
-        if not cost_reported:
-            cost_reported = self._try_record_cost(
+    async def _handle_stream_iteration(
+        self,
+        *,
+        b: B,
+        response: Any,
+        tracer: Tracer,
+        runtime: _LLMRuntimeConfig,
+        state: _LLMExecutionState,
+        iteration: int,
+    ) -> _LLMIterationOutcome:
+        streamed_tool_calls: list[ToolCall] = []
+        iteration_finish_reason = ""
+        async for chunk in response:
+            self._record_usage(
+                payload=chunk,
                 tracer=tracer,
-                tokens=last_tokens,
-                input_price_per_m=input_price_per_m,
-                output_price_per_m=output_price_per_m,
+                runtime=runtime,
+                state=state,
+                response=response,
+            )
+            choice = self._first_choice(chunk)
+            if choice is None:
+                continue
+
+            delta = self._obj_get(choice, "delta")
+            delta_content = self._content_to_text(self._obj_get(delta, "content"))
+            state.output += delta_content
+            fr = self._obj_get(choice, "finish_reason")
+            if fr is not None:
+                iteration_finish_reason = str(fr)
+            self._merge_streamed_tool_calls(streamed_tool_calls, self._obj_get(delta, "tool_calls"))
+            await self._call_stream_delta_callback(
+                b,
+                state.output,
+                delta_content,
+                False,
+                iteration_finish_reason,
+            )
+
+        state.finish_reason = iteration_finish_reason
+        if streamed_tool_calls:
+            return await self._handle_tool_calls(
+                b=b,
+                tracer=tracer,
+                runtime=runtime,
+                state=state,
+                tool_calls=streamed_tool_calls,
+                iteration=iteration,
+            )
+        return _LLMIterationOutcome()
+
+    async def _handle_nonstream_iteration(
+        self,
+        *,
+        b: B,
+        response: Any,
+        tracer: Tracer,
+        runtime: _LLMRuntimeConfig,
+        state: _LLMExecutionState,
+        iteration: int,
+    ) -> _LLMIterationOutcome:
+        choice = self._first_choice(response)
+        message = None
+        if choice is not None:
+            message = self._obj_get(choice, "message")
+            state.output = self._content_to_text(self._obj_get(message, "content"))
+            fr = self._obj_get(choice, "finish_reason")
+            if fr is not None:
+                state.finish_reason = str(fr)
+
+        self._record_usage(
+            payload=response,
+            tracer=tracer,
+            runtime=runtime,
+            state=state,
+            response=response,
+        )
+        raw_tool_calls = self._obj_get(message, "tool_calls")
+        if raw_tool_calls:
+            return await self._handle_tool_calls(
+                b=b,
+                tracer=tracer,
+                runtime=runtime,
+                state=state,
+                tool_calls=[ToolCall.from_dict(tc) for tc in raw_tool_calls],
+                iteration=iteration,
+            )
+        return _LLMIterationOutcome()
+
+    async def _run_iteration(
+        self,
+        *,
+        b: B,
+        tracer: Tracer,
+        runtime: _LLMRuntimeConfig,
+        state: _LLMExecutionState,
+        iteration: int,
+    ) -> _LLMIterationOutcome:
+        client_kwargs, request_kwargs = self._prepare_request(runtime, tracer)
+        client = _new_async_openai_client(**client_kwargs)
+        try:
+            response = await client.chat.completions.create(**request_kwargs)
+            if runtime.stream:
+                return await self._handle_stream_iteration(
+                    b=b,
+                    response=response,
+                    tracer=tracer,
+                    runtime=runtime,
+                    state=state,
+                    iteration=iteration,
+                )
+            return await self._handle_nonstream_iteration(
+                b=b,
+                response=response,
+                tracer=tracer,
+                runtime=runtime,
+                state=state,
+                iteration=iteration,
+            )
+        finally:
+            await _close_openai_client(client)
+
+    async def _finish_streaming_if_needed(self, b: B, runtime: _LLMRuntimeConfig, state: _LLMExecutionState) -> None:
+        if runtime.stream:
+            await self._call_stream_delta_callback(b, state.output, "", True, state.finish_reason)
+
+    def _finalize_execution(
+        self,
+        *,
+        tracer: Tracer,
+        runtime: _LLMRuntimeConfig,
+        state: _LLMExecutionState,
+    ) -> Result:
+        tracer.update_attributes(output=state.output)
+        tracer.update_attributes(finish_reason=state.finish_reason)
+        if state.last_tokens is None:
+            state.last_tokens = self._compute_tokens(runtime.model, runtime.messages, state.output)
+        if not state.cost_reported:
+            state.cost_reported = self._try_record_cost(
+                tracer=tracer,
+                tokens=state.last_tokens,
+                input_price_per_m=runtime.input_price_per_m,
+                output_price_per_m=runtime.output_price_per_m,
                 cost_reported=False,
             )
-        if last_tokens is not None:
-            tracer.update_attributes(tokens=last_tokens)
-            if "prompt" in last_tokens:
-                tracer.update_attributes(prompt_tokens=last_tokens["prompt"])
-            if "completion" in last_tokens:
-                tracer.update_attributes(completion_tokens=last_tokens["completion"])
-            if "total" in last_tokens:
-                tracer.update_attributes(total_tokens=last_tokens["total"])
+        if state.last_tokens is not None:
+            tracer.update_attributes(tokens=state.last_tokens)
+            if "prompt" in state.last_tokens:
+                tracer.update_attributes(prompt_tokens=state.last_tokens["prompt"])
+            if "completion" in state.last_tokens:
+                tracer.update_attributes(completion_tokens=state.last_tokens["completion"])
+            if "total" in state.last_tokens:
+                tracer.update_attributes(total_tokens=state.last_tokens["total"])
+        return Result.OK(state.output)
 
-        return Result.OK(output)
+    @override
+    async def _impl(self, context: Context, tracer: Tracer) -> Result:
+        b = cast(B, context._current_blackboard())
+        runtime = self._resolve_runtime_config(b, tracer)
+        state = _LLMExecutionState()
+
+        for iteration in range(1, self._max_iterations + 1):
+            state.last_tokens = None
+            tracer.update_attributes(iteration=iteration)
+            outcome = await self._run_iteration(
+                b=b,
+                tracer=tracer,
+                runtime=runtime,
+                state=state,
+                iteration=iteration,
+            )
+            if outcome.result is not None:
+                return outcome.result
+            if outcome.should_continue:
+                continue
+            break
+
+        await self._finish_streaming_if_needed(b, runtime, state)
+        return self._finalize_execution(tracer=tracer, runtime=runtime, state=state)
 
 
 ############################
