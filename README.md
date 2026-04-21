@@ -151,6 +151,7 @@ Notes:
     - [Subtree](#subtree)
     - [ParseJSON](#parsejson)
     - [LLM](#llm)
+    - [Tool Call](#tool-call)
   - [Composite Nodes](#composite-nodes)
     - [Sequence](#sequence)
     - [Selector](#selector)
@@ -457,6 +458,43 @@ tree = (
     .End()
 )
 ```
+
+
+
+## Tool Call <span id="tool-call"></span> <a href="#ref">[↑]</a>
+
+`LLMNode` supports tool calls out of the box: when the LLM returns `tool_calls`, the node
+executes them via `tool_executor`, appends results to the conversation, and re-calls the LLM
+until the final answer is reached (up to `max_iterations`).
+
+```python
+from tinytasktree import JSON, ToolCall, ToolDef, ToolFunctionDef, Tree
+
+TOOLS = [
+    ToolDef(
+        type="function",
+        function=ToolFunctionDef(
+            name="get_weather",
+            description="Get the current weather in a given location",
+            parameters={"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]},
+        ),
+    ),
+]
+
+def tool_executor(b: Blackboard, tool_call: ToolCall) -> JSON:
+    return {"location": "Beijing", "weather": "sunny", "temperature": 25}
+
+tree = (
+    Tree[Blackboard]("WeatherApp")
+    .Sequence()
+    ._().LLM(model, make_messages, tools=TOOLS, tool_executor=tool_executor, max_iterations=5)
+    ._().WriteBlackboard("weather_result")
+    .End()
+)
+```
+
+`tool_executor` supports sync/async and `tools` accepts `ToolDef` dataclasses (or raw dicts).
+Streaming tool calls are also supported -- deltas are accumulated and executed after the stream completes.
 
 ### Composite Nodes <span id="composite-nodes"></span> <a href="#ref">[↑]</a>
 
@@ -870,6 +908,7 @@ tree = (
 - `TraceStorageHandler` / `FileTraceStorageHandler`: save and load traces
 - `register_global_hook_after_spawned_task_finish(hook)`: hook for Parallel/Gather/Terminable tasks
 - `run_httpserver(host, port, trace_dir)` / `create_http_app(...)`: built-in HTTP trace server
+
 
 ## Contributing <span id="contributing"></span>
 

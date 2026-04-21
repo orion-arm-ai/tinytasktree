@@ -1253,3 +1253,13 @@ body {
 .search-input {
   width: 100%;
 }
+
+/* Force attrs table Key column width */
+.attrs-table .ant-table-tbody > tr > td:first-child {
+  min-width: 140px !important;
+  max-width: 140px !important;
+}
+.attrs-table .ant-table-thead > tr > th:first-child {
+  min-width: 140px !important;
+  max-width: 140px !important;
+}
