@@ -44,6 +44,7 @@ async def test_llm_basic_non_stream_stats(mock_openai):
 
     async def handler(**kwargs):
         recorded.update(kwargs)
+        recorded["messages"] = [dict(message) for message in kwargs["messages"]]
         return {
             "choices": [{"message": {"content": "hello"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
@@ -67,7 +68,8 @@ async def test_llm_basic_non_stream_stats(mock_openai):
         result = await tree(context)
 
     assert result.is_ok()
-    assert result.data == "hello"
+    assert isinstance(result.data, tinytasktree.LLMRunRecord)
+    assert result.data.final_output == "hello"
     assert recorded["model"] == "mock/basic"
     assert recorded["messages"] == [{"role": "user", "content": "hi"}]
     assert recorded["stream"] is False
@@ -308,7 +310,8 @@ async def test_llm_streaming_tokens(mock_openai):
         result = await tree(context)
 
     assert result.is_ok()
-    assert result.data == "hello"
+    assert isinstance(result.data, tinytasktree.LLMRunRecord)
+    assert result.data.final_output == "hello"
 
     trace = _find_first_trace_by_kind(context.trace_root(), "LLM")
     assert trace.attributes["tokens"] == {"prompt": 2, "completion": 3, "total": 5}

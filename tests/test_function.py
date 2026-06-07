@@ -120,7 +120,7 @@ async def test_function_exception_results_in_fail():
 
 
 async def test_function_with_invalid_parameter_count_fails_at_build_time():
-    def invalid(a, b, c):
+    def invalid(a, b, c, d):
         return None
 
     with pytest.raises(tinytasktree.TasktreeProgrammingError):

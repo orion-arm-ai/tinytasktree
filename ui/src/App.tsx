@@ -219,14 +219,13 @@ type StackIndex = {
     rowMap: Map<string, StackRow>;
 };
 
-type ExecutedToolCallJson = {
+type ToolCallDisplayJson = {
     id?: string;
     name?: string;
     arguments?: unknown;
     result?: unknown;
     ok?: boolean;
     error?: string | null;
-    iteration?: number;
     duration_ms?: number;
     phase?: "requested" | "executed";
 };
@@ -505,7 +504,7 @@ function stringifyPretty(value: unknown): string {
     return JSON.stringify(value, null, 2);
 }
 
-function toolCallToDisplay(toolCall: unknown): ExecutedToolCallJson | null {
+function toolCallToDisplay(toolCall: unknown): ToolCallDisplayJson | null {
     if (!toolCall || typeof toolCall !== "object") return null;
     const obj = toolCall as { id?: string; function?: { name?: string; arguments?: unknown } };
     const rawArguments = obj.function?.arguments;
@@ -518,10 +517,10 @@ function toolCallToDisplay(toolCall: unknown): ExecutedToolCallJson | null {
     };
 }
 
-function collectRequestedToolCalls(record: unknown): ExecutedToolCallJson[] {
+function collectRequestedToolCalls(record: unknown): ToolCallDisplayJson[] {
     if (!record || typeof record !== "object") return [];
     const obj = record as { tool_calls?: unknown; messages?: unknown };
-    const rows: ExecutedToolCallJson[] = [];
+    const rows: ToolCallDisplayJson[] = [];
     if (Array.isArray(obj.tool_calls)) {
         obj.tool_calls.forEach((toolCall) => {
             const row = toolCallToDisplay(toolCall);
@@ -542,9 +541,9 @@ function collectRequestedToolCalls(record: unknown): ExecutedToolCallJson[] {
     return rows;
 }
 
-function mergeToolRows(rows: ExecutedToolCallJson[]): ExecutedToolCallJson[] {
+function mergeToolRows(rows: ToolCallDisplayJson[]): ToolCallDisplayJson[] {
     const seen = new Set<string>();
-    const result: ExecutedToolCallJson[] = [];
+    const result: ToolCallDisplayJson[] = [];
     rows.forEach((row) => {
         const key = `${row.phase || "executed"}:${row.id || ""}:${row.name || ""}:${JSON.stringify(row.arguments ?? null)}`;
         if (seen.has(key)) return;
@@ -554,19 +553,19 @@ function mergeToolRows(rows: ExecutedToolCallJson[]): ExecutedToolCallJson[] {
     return result;
 }
 
-function toolExecutionsFromTrace(node: TraceNodeJson | null): ExecutedToolCallJson[] {
+function toolExecutionsFromTrace(node: TraceNodeJson | null): ToolCallDisplayJson[] {
     if (!node) return [];
-    const rows: ExecutedToolCallJson[] = [];
+    const rows: ToolCallDisplayJson[] = [];
     const direct = parseJsonValue(node.attributes?.tool_executions);
     if (Array.isArray(direct)) {
-        rows.push(...(direct as ExecutedToolCallJson[]).map((row) => ({ ...row, phase: "executed" as const })));
+        rows.push(...(direct as ToolCallDisplayJson[]).map((row) => ({ ...row, phase: "executed" as const })));
     }
 
     const attrRecord = parseJsonValue(node.attributes?.llm_record);
     if (attrRecord && typeof attrRecord === "object") {
-        const executions = (attrRecord as { executed_tool_calls?: unknown }).executed_tool_calls;
+        const executions = (attrRecord as { tool_results?: unknown }).tool_results;
         if (Array.isArray(executions)) {
-            rows.push(...(executions as ExecutedToolCallJson[]).map((row) => ({ ...row, phase: "executed" as const })));
+            rows.push(...(executions as ToolCallDisplayJson[]).map((row) => ({ ...row, phase: "executed" as const })));
         }
         rows.push(...collectRequestedToolCalls(attrRecord));
     }
@@ -574,9 +573,9 @@ function toolExecutionsFromTrace(node: TraceNodeJson | null): ExecutedToolCallJs
     const resultData = getResultData(node.result);
     const resultRecord = parseJsonValue(resultData);
     if (resultRecord && typeof resultRecord === "object") {
-        const executions = (resultRecord as { executed_tool_calls?: unknown }).executed_tool_calls;
+        const executions = (resultRecord as { tool_results?: unknown }).tool_results;
         if (Array.isArray(executions)) {
-            rows.push(...(executions as ExecutedToolCallJson[]).map((row) => ({ ...row, phase: "executed" as const })));
+            rows.push(...(executions as ToolCallDisplayJson[]).map((row) => ({ ...row, phase: "executed" as const })));
         }
         rows.push(...collectRequestedToolCalls(resultRecord));
     }
@@ -1680,7 +1679,7 @@ function TraceUI() {
                                     dataIndex: "name",
                                     key: "name",
                                     width: 160,
-                                    render: (value: string, row: ExecutedToolCallJson) => (
+                                    render: (value: string, row: ToolCallDisplayJson) => (
                                         <Space direction="vertical" size={2}>
                                             <Text code>{value || "(unknown)"}</Text>
                                             <Text type="secondary">iter {row.iteration ?? "-"}</Text>
@@ -1692,7 +1691,7 @@ function TraceUI() {
                                     dataIndex: "ok",
                                     key: "ok",
                                     width: 118,
-                                    render: (ok: boolean | undefined, row: ExecutedToolCallJson) => {
+                                    render: (ok: boolean | undefined, row: ToolCallDisplayJson) => {
                                         if (row.phase === "requested") return <Tag color="blue">REQUESTED</Tag>;
                                         return <Tag color={ok === false ? "red" : "green"}>{ok === false ? "FAIL" : "OK"}</Tag>;
                                     },
@@ -1708,7 +1707,7 @@ function TraceUI() {
                                 {
                                     title: "Arguments / Result",
                                     key: "details",
-                                    render: (_: unknown, row: ExecutedToolCallJson) => (
+                                    render: (_: unknown, row: ToolCallDisplayJson) => (
                                         <div className="tool-call-details">
                                             <Text type="secondary">Arguments</Text>
                                             <pre className="panel-content tool-call-pre">

@@ -60,7 +60,6 @@ class Blackboard:
     messages: list[JSON] = field(default_factory=list)
     todos: list[TodoItem] = field(default_factory=list)
     done: bool = False
-    llm_record: LLMRunRecord | None = None
 
 
 # --- Tools ---
@@ -173,7 +172,6 @@ async def decide_next_step(b: Blackboard, tracer: Tracer, context: Context) -> R
         b.done = True
         return Result.FAIL("missing llm record")
 
-    b.llm_record = result.data
     if result.data.tool_calls:
         b.done = False
         return Result.OK(None)

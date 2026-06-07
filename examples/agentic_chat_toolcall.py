@@ -41,12 +41,10 @@ MODEL = LLMModel("deepseek-v4-flash", provider=PROVIDER, extra_body={"reasoning"
 
 @dataclass
 class Blackboard:
-    user_input: str = ""
     # Persisted conversation context: user, assistant, assistant tool_calls, and tool results.
     messages: list[JSON] = field(default_factory=list)
     memory: dict[str, str] = field(default_factory=dict)
     turn_finished: bool = True
-    last_record: LLMRunRecord | None = None
     streaming_answer_started: bool = False
 
 
@@ -186,14 +184,11 @@ async def decide_next_step(b: Blackboard, tracer: Tracer, context: Context) -> R
         b.turn_finished = True
         return Result.FAIL("missing llm record")
 
-    record = result.data
-    b.last_record = record
-
-    if not record.tool_calls:
+    if not result.data.tool_calls:
         b.turn_finished = True
         tracer.update_attributes(chat_transcript=b.messages)
         context.parent_tracer(2).update_attributes(chat_transcript=b.messages)
-        return Result.OK(record.final_output)
+        return Result.OK(result.data.final_output)
 
     b.turn_finished = False
     tracer.update_attributes(chat_transcript=b.messages)
@@ -219,10 +214,8 @@ tree = (
 
 
 async def run_turn(blackboard: Blackboard, text: str, trace_dir: str | None = None) -> str:
-    blackboard.user_input = text
     blackboard.messages.append({"role": "user", "content": text})
     blackboard.turn_finished = False
-    blackboard.last_record = None
     blackboard.streaming_answer_started = False
     context = Context()
     async with context.using_blackboard(blackboard):

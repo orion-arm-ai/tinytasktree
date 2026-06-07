@@ -33,6 +33,7 @@ async def test_simple_tree_llm_parse_json(mock_openai):
         tinytasktree.Tree[Blackboard]("SimpleTree")
         .Sequence()
         ._().LLM("mock/model", make_messages)
+        ._().Function(lambda b, tracer, context: context._last_result.data.final_output)
         ._().ParseJSON(dst="parsed")
         .End()
     )

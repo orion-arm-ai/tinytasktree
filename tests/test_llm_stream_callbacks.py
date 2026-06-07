@@ -58,7 +58,8 @@ async def test_llm_stream_on_delta_sync(mock_openai):
         result = await tree(context)
 
     assert result.is_ok()
-    assert result.data == "hello"
+    assert isinstance(result.data, tinytasktree.LLMRunRecord)
+    assert result.data.final_output == "hello"
     assert seen[0] == ("he", "he", False)
     assert seen[1] == ("hello", "llo", False)
     assert seen[2] == ("hello", "", True)
@@ -99,7 +100,8 @@ async def test_llm_stream_on_delta_async(mock_openai):
         result = await tree(context)
 
     assert result.is_ok()
-    assert result.data == "hello"
+    assert isinstance(result.data, tinytasktree.LLMRunRecord)
+    assert result.data.final_output == "hello"
     assert seen[0] == ("he", "he", False, "")
     assert seen[1] == ("hello", "llo", False, "stop")
     assert seen[2] == ("hello", "", True, "stop")

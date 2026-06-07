@@ -1361,7 +1361,6 @@ class LLMRunRecord:
     tool_results: list[ToolResult]
     final_output: str = ""
     finish_reason: str = ""
-    iterations: int = 0
 
     def json(self) -> JSON:
         return {
@@ -1372,7 +1371,6 @@ class LLMRunRecord:
             "tool_results": [tr.json() for tr in self.tool_results],
             "final_output": self.final_output,
             "finish_reason": self.finish_reason,
-            "iterations": self.iterations,
         }
 
 
@@ -1762,7 +1760,6 @@ class LLMNode[B](LeafNode[B]):
         *,
         runtime: _LLMRuntimeConfig,
         state: _LLMExecutionState,
-        iterations: int,
     ) -> LLMRunRecord:
         return LLMRunRecord(
             input_messages=self._clone_json_list(runtime.input_messages),
@@ -1772,7 +1769,6 @@ class LLMNode[B](LeafNode[B]):
             tool_results=list(state.tool_results),
             final_output=state.output,
             finish_reason=state.finish_reason,
-            iterations=iterations,
         )
 
     @staticmethod
@@ -1905,28 +1901,23 @@ class LLMNode[B](LeafNode[B]):
         tracer: Tracer,
         runtime: _LLMRuntimeConfig,
         state: _LLMExecutionState,
-        iterations: int,
-        status: Status,
-        failure_reason: str | None = None,
     ) -> Result:
-        if status == Status.OK:
-            assistant_message = self._assistant_message(state.output, state.tool_calls)
-            if assistant_message is not None:
-                try:
-                    await self._append_emitted_message(b, runtime, state, tracer, assistant_message)
-                    await self._execute_tool_calls(
-                        b=b,
-                        context=context,
-                        tracer=tracer,
-                        runtime=runtime,
-                        state=state,
-                    )
-                except Exception as e:
-                    tracer.error(e)
-                    status = Status.FAIL
-        record = self._build_run_record(runtime=runtime, state=state, iterations=iterations)
-        if failure_reason is not None:
-            tracer.update_attributes(tool_call_failure=failure_reason)
+        status = Status.OK
+        assistant_message = self._assistant_message(state.output, state.tool_calls)
+        if assistant_message is not None:
+            try:
+                await self._append_emitted_message(b, runtime, state, tracer, assistant_message)
+                await self._execute_tool_calls(
+                    b=b,
+                    context=context,
+                    tracer=tracer,
+                    runtime=runtime,
+                    state=state,
+                )
+            except Exception as e:
+                tracer.error(e)
+                status = Status.FAIL
+        record = self._build_run_record(runtime=runtime, state=state)
         tracer.update_attributes(llm_record=record.json())
         if record.tool_calls:
             tracer.update_attributes(tool_calls=[tc.to_dict() for tc in record.tool_calls])
@@ -2106,16 +2097,14 @@ class LLMNode[B](LeafNode[B]):
             else:
                 streamed_tool_calls.append(new_tc)
 
-    async def _handle_stream_iteration(
+    async def _handle_stream_response(
         self,
         *,
-        context: Context,
         b: B,
         response: Any,
         tracer: Tracer,
         runtime: _LLMRuntimeConfig,
         state: _LLMExecutionState,
-        iteration: int,
     ) -> None:
         streamed_tool_calls: list[ToolCall] = []
         iteration_finish_reason = ""
@@ -2151,16 +2140,13 @@ class LLMNode[B](LeafNode[B]):
             tracer.update_attributes(tool_calls=True)
             state.tool_calls.extend(streamed_tool_calls)
 
-    async def _handle_nonstream_iteration(
+    async def _handle_nonstream_response(
         self,
         *,
-        context: Context,
-        b: B,
         response: Any,
         tracer: Tracer,
         runtime: _LLMRuntimeConfig,
         state: _LLMExecutionState,
-        iteration: int,
     ) -> None:
         choice = self._first_choice(response)
         message = None
@@ -2183,46 +2169,35 @@ class LLMNode[B](LeafNode[B]):
             tracer.update_attributes(tool_calls=True)
             state.tool_calls.extend([ToolCall.from_dict(tc) for tc in raw_tool_calls])
 
-    async def _run_iteration(
+    async def _run_llm_call(
         self,
         *,
-        context: Context,
         b: B,
         tracer: Tracer,
         runtime: _LLMRuntimeConfig,
         state: _LLMExecutionState,
-        iteration: int,
     ) -> None:
         client_kwargs, request_kwargs = self._prepare_request(runtime, tracer)
         client = _new_async_openai_client(**client_kwargs)
         try:
             response = await client.chat.completions.create(**request_kwargs)
             if runtime.stream:
-                await self._handle_stream_iteration(
-                    context=context,
+                await self._handle_stream_response(
                     b=b,
                     response=response,
                     tracer=tracer,
                     runtime=runtime,
                     state=state,
-                    iteration=iteration,
                 )
                 return
-            await self._handle_nonstream_iteration(
-                context=context,
-                b=b,
+            await self._handle_nonstream_response(
                 response=response,
                 tracer=tracer,
                 runtime=runtime,
                 state=state,
-                iteration=iteration,
             )
         finally:
             await _close_openai_client(client)
-
-    async def _finish_streaming_if_needed(self, b: B, runtime: _LLMRuntimeConfig, state: _LLMExecutionState) -> None:
-        if runtime.stream:
-            await self._call_stream_delta_callback(b, state.output, "", True, state.finish_reason)
 
     async def _finalize_execution(
         self,
@@ -2232,7 +2207,6 @@ class LLMNode[B](LeafNode[B]):
         tracer: Tracer,
         runtime: _LLMRuntimeConfig,
         state: _LLMExecutionState,
-        iterations: int,
     ) -> Result:
         tracer.update_attributes(output=state.output)
         tracer.update_attributes(finish_reason=state.finish_reason)
@@ -2260,8 +2234,6 @@ class LLMNode[B](LeafNode[B]):
             tracer=tracer,
             runtime=runtime,
             state=state,
-            iterations=iterations,
-            status=Status.OK,
         )
 
     @override
@@ -2270,24 +2242,21 @@ class LLMNode[B](LeafNode[B]):
         runtime = self._resolve_runtime_config(b, tracer)
         state = _LLMExecutionState()
         state.last_tokens = None
-        tracer.update_attributes(iteration=1)
-        await self._run_iteration(
-            context=context,
+        await self._run_llm_call(
             b=b,
             tracer=tracer,
             runtime=runtime,
             state=state,
-            iteration=1,
         )
 
-        await self._finish_streaming_if_needed(b, runtime, state)
+        if runtime.stream:
+            await self._call_stream_delta_callback(b, state.output, "", True, state.finish_reason)
         return await self._finalize_execution(
             b=b,
             context=context,
             tracer=tracer,
             runtime=runtime,
             state=state,
-            iterations=1,
         )
 
 
