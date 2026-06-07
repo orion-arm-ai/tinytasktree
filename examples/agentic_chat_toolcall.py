@@ -10,7 +10,6 @@ Defaults:
 
 import asyncio
 import ast
-import json
 import operator
 import os
 import sys
@@ -18,7 +17,18 @@ from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")
 
-from tinytasktree import Context, FileTraceStorageHandler, JSON, LLMModel, LLMProvider, LLMRunRecord, Result, Tool, Tracer, Tree
+from tinytasktree import (
+    Context,
+    FileTraceStorageHandler,
+    JSON,
+    LLMModel,
+    LLMProvider,
+    LLMRunRecord,
+    Result,
+    Tool,
+    Tracer,
+    Tree,
+)
 
 
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
@@ -35,7 +45,6 @@ class Blackboard:
     # Persisted conversation context: user, assistant, assistant tool_calls, and tool results.
     messages: list[JSON] = field(default_factory=list)
     memory: dict[str, str] = field(default_factory=dict)
-    include_user_input: bool = True
     turn_finished: bool = True
     last_record: LLMRunRecord | None = None
     streaming_answer_started: bool = False
@@ -152,14 +161,11 @@ def make_messages(b: Blackboard) -> list[JSON]:
             "If the user states a durable preference or fact, call save_memory before answering."
         ),
     }
-    messages = [system, *b.messages]
-    if b.include_user_input:
-        messages.append({"role": "user", "content": b.user_input})
-    return messages
+    return [system, *b.messages]
 
 
-def store_llm_record(b: Blackboard, record: LLMRunRecord, tracer: Tracer) -> None:
-    b.last_record = record
+def store_llm_message(b: Blackboard, message: JSON, tracer: Tracer) -> None:
+    b.messages.append(message)
 
 
 def on_stream_delta(b: Blackboard, full: str, delta: str, finished: bool, reason: str = "") -> None:
@@ -174,14 +180,14 @@ def on_stream_delta(b: Blackboard, full: str, delta: str, finished: bool, reason
         print()
 
 
-async def process_llm_record(b: Blackboard, tracer: Tracer, context: Context) -> Result:
-    record = b.last_record
-    if record is None:
+async def decide_next_step(b: Blackboard, tracer: Tracer, context: Context) -> Result:
+    result = context._last_result
+    if result is None or not isinstance(result.data, LLMRunRecord):
         b.turn_finished = True
         return Result.FAIL("missing llm record")
 
-    b.messages = [message for message in record.messages if message.get("role") != "system"]
-    b.include_user_input = False
+    record = result.data
+    b.last_record = record
 
     if not record.tool_calls:
         b.turn_finished = True
@@ -189,49 +195,7 @@ async def process_llm_record(b: Blackboard, tracer: Tracer, context: Context) ->
         context.parent_tracer(2).update_attributes(chat_transcript=b.messages)
         return Result.OK(record.final_output)
 
-    tools = {tool.NAME: tool for tool in make_tools(b)}
-    tool_executions: list[JSON] = []
-    for tool_call in record.tool_calls:
-        name = tool_call.function.name
-        arguments_text = tool_call.function.arguments or "{}"
-        executed = f"{name}({arguments_text})"
-        started = asyncio.get_running_loop().time()
-        arguments: JSON = {}
-        try:
-            parsed_arguments = json.loads(arguments_text)
-            if not isinstance(parsed_arguments, dict):
-                raise ValueError("tool arguments must be a JSON object")
-            arguments = parsed_arguments
-            tool = tools[name]
-            executed = tool.format_call(arguments)
-            result = await tool.execute(b, arguments, Context(), tracer)
-            content: JSON = {"ok": True, "executed": executed, "result": result}
-        except KeyError:
-            content = {"ok": False, "executed": executed, "error": f"unknown tool: {name}", "code": "tool_not_found"}
-        except Exception as e:
-            content = {"ok": False, "executed": executed, "error": str(e), "code": "tool_execution_error"}
-        duration_ms = (asyncio.get_running_loop().time() - started) * 1000
-        content["duration_ms"] = duration_ms
-        b.messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": json.dumps(content, ensure_ascii=False),
-            }
-        )
-        tool_executions.append(
-            {
-                "id": tool_call.id,
-                "name": name,
-                "arguments": arguments,
-                "result": content.get("result", content),
-                "ok": content["ok"],
-                "error": content.get("error"),
-                "iteration": record.iterations,
-                "duration_ms": duration_ms,
-            }
-        )
-    tracer.update_attributes(tool_executions=tool_executions)
+    b.turn_finished = False
     tracer.update_attributes(chat_transcript=b.messages)
     context.parent_tracer(2).update_attributes(chat_transcript=b.messages)
     return Result.OK(None)
@@ -247,16 +211,16 @@ tree = (
         stream=CHAT_STREAM,
         stream_on_delta=on_stream_delta if CHAT_STREAM else None,
         tools=make_tools,
-        on_llm_record=store_llm_record,
+        on_llm_message=store_llm_message,
     )
-    ._()._().Function(process_llm_record)
+    ._()._().Function(decide_next_step)
     .End()
 )
 
 
 async def run_turn(blackboard: Blackboard, text: str, trace_dir: str | None = None) -> str:
     blackboard.user_input = text
-    blackboard.include_user_input = True
+    blackboard.messages.append({"role": "user", "content": text})
     blackboard.turn_finished = False
     blackboard.last_record = None
     blackboard.streaming_answer_started = False

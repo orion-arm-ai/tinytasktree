@@ -6,8 +6,8 @@ Demonstrates LLM tool call support with multiple tools:
 - `add_todo`: Adds a task to a todo list stored on the blackboard
 - `list_todos`: Lists all tasks on the todo list
 
-The LLM iteratively calls tools until it has enough information
-to produce a final text response.
+Each LLM node call executes requested tools once. An outer While node calls
+the LLM again with tool results until it produces a final text response.
 
 Usage:
     export LLM_BASE_URL="https://your-api.example.com/v1"
@@ -29,7 +29,10 @@ from tinytasktree import (
     JSON,
     LLMModel,
     LLMProvider,
+    LLMRunRecord,
+    Result,
     Tool,
+    Tracer,
     Tree,
 )
 
@@ -54,7 +57,10 @@ class Blackboard:
     """Shared state accessible by tools and the LLM."""
 
     prompt: str
+    messages: list[JSON] = field(default_factory=list)
     todos: list[TodoItem] = field(default_factory=list)
+    done: bool = False
+    llm_record: LLMRunRecord | None = None
 
 
 # --- Tools ---
@@ -151,7 +157,29 @@ TOOLS = [CurrentTimeTool(), CalculatorTool(), AddTodoTool(), ListTodosTool()]
 # --- Message Builder ---
 
 def make_messages(b: Blackboard) -> list[JSON]:
-    return [{"role": "user", "content": b.prompt}]
+    return [
+        {"role": "system", "content": "Use tools when needed, then answer after seeing tool results."},
+        *b.messages,
+    ]
+
+
+def on_llm_message(b: Blackboard, message: JSON, tracer: Tracer) -> None:
+    b.messages.append(message)
+
+
+async def decide_next_step(b: Blackboard, tracer: Tracer, context: Context) -> Result:
+    result = context._last_result
+    if result is None or not isinstance(result.data, LLMRunRecord):
+        b.done = True
+        return Result.FAIL("missing llm record")
+
+    b.llm_record = result.data
+    if result.data.tool_calls:
+        b.done = False
+        return Result.OK(None)
+
+    b.done = True
+    return Result.OK(result.data.final_output)
 
 
 # --- Build the Tree ---
@@ -159,12 +187,15 @@ def make_messages(b: Blackboard) -> list[JSON]:
 # fmt: off
 tree = (
     Tree[Blackboard]("ToolCallAssistant")
-    .Sequence()
-    ._().LLM(
+    .While(lambda b: not b.done, max_loop_times=6)
+    ._().Sequence()
+    ._()._().LLM(
         MODEL,
         make_messages,
         tools=TOOLS,
+        on_llm_message=on_llm_message,
     )
+    ._()._().Function(decide_next_step)
     .End()
 )
 # fmt: on
@@ -183,6 +214,7 @@ async def main() -> None:
 """
 
     blackboard = Blackboard(prompt=prompt)
+    blackboard.messages.append({"role": "user", "content": prompt})
     context = Context()
 
     print("=== Tool Call Assistant ===\n")
@@ -193,7 +225,7 @@ async def main() -> None:
         result = await tree(context)
 
     print("\n--- Final Result ---")
-    print(f"Response: {result.data.final_output if result.data else ''}")
+    print(f"Response: {result.data or ''}")
     print(f"Todos: {blackboard.todos}")
 
     # Save trace for visualization

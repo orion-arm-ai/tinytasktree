@@ -463,9 +463,9 @@ tree = (
 
 ## Tool Call <span id="tool-call"></span> <a href="#ref">[↑]</a>
 
-`LLMNode` supports tool definitions out of the box: it sends `Tool` schemas to the model and
-returns requested `tool_calls` in `LLMRunRecord`. Execute requested tools in your tree or
-application loop, append `role="tool"` messages, then call an LLM node again.
+`LLMNode` supports tool definitions out of the box: it sends `Tool` schemas to the model,
+then executes returned tool calls in order. The node still performs exactly one model call;
+use an outer `While` if the model should see tool results and answer in a later LLM call.
 
 ```python
 from tinytasktree import Context, JSON, Tool, Tree
@@ -483,14 +483,16 @@ class WeatherTool(Tool[Blackboard]):
 tree = (
     Tree[Blackboard]("WeatherApp")
     .Sequence()
-    ._().LLM(model, make_messages, tools=[WeatherTool()])
+    ._().LLM(model, make_messages, tools=[WeatherTool()], on_llm_message=lambda b, message, tracer: b.messages.append(message))
     ._().WriteBlackboard("llm_record")
     .End()
 )
 ```
 
-The LLM node returns an `LLMRunRecord` containing final text, full messages, and requested
-tool calls. Streaming tool call deltas are accumulated into the returned record.
+The LLM node returns an `LLMRunRecord` containing final text, full messages, emitted
+assistant/tool messages, requested tool calls, and tool results. Streaming tool call deltas
+are accumulated before execution. Use `on_llm_message` to persist each emitted message as it
+is produced.
 
 ### Composite Nodes <span id="composite-nodes"></span> <a href="#ref">[↑]</a>
 

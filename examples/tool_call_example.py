@@ -1,8 +1,8 @@
 """Tool call example.
 
-Demonstrates LLM tool call support: the LLM can request tool execution,
-and Tool subclasses handle the actual work. The LLM is called again
-with the tool results until it returns a final text response.
+Demonstrates LLM tool call support: the LLM node executes requested tools,
+and an outer While calls the LLM again with tool results until it returns
+a final text response.
 """
 
 import asyncio
@@ -11,9 +11,20 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from tinytasktree import JSON, Context, FileTraceStorageHandler, LLMModel, LLMProvider, Tool, Tree
+from tinytasktree import (
+    Context,
+    FileTraceStorageHandler,
+    JSON,
+    LLMModel,
+    LLMProvider,
+    LLMRunRecord,
+    Result,
+    Tool,
+    Tracer,
+    Tree,
+)
 
 # Requirements:
 #   - LLM_BASE_URL and LLM_API_KEY set for your LLM service
@@ -26,7 +37,9 @@ MODEL = LLMModel("deepseek-v4-flash", provider=PROVIDER, extra_body={"reasoning"
 @dataclass
 class Blackboard:
     prompt: str
-    llm_record: object | None = None
+    messages: list[JSON] = field(default_factory=list)
+    done: bool = False
+    llm_record: LLMRunRecord | None = None
 
 
 class WeatherTool(Tool[Blackboard]):
@@ -52,19 +65,43 @@ class WeatherTool(Tool[Blackboard]):
 
 
 def make_messages(b: Blackboard) -> list[JSON]:
-    return [{"role": "user", "content": b.prompt}]
+    return [
+        {"role": "system", "content": "Use tools when needed, then answer after seeing tool results."},
+        *b.messages,
+    ]
+
+
+def on_llm_message(b: Blackboard, message: JSON, tracer: Tracer) -> None:
+    b.messages.append(message)
+
+
+async def decide_next_step(b: Blackboard, tracer: Tracer, context: Context) -> Result:
+    result = context._last_result
+    if result is None or not isinstance(result.data, LLMRunRecord):
+        b.done = True
+        return Result.FAIL("missing llm record")
+
+    b.llm_record = result.data
+    if result.data.tool_calls:
+        b.done = False
+        return Result.OK(None)
+
+    b.done = True
+    return Result.OK(result.data.final_output)
 
 
 # fmt: off
 tree = (
     Tree[Blackboard]("ToolCall")
-    .Sequence()
-    ._().LLM(
+    .While(lambda b: not b.done, max_loop_times=4)
+    ._().Sequence()
+    ._()._().LLM(
         MODEL,
         make_messages,
         tools=[WeatherTool()],
+        on_llm_message=on_llm_message,
     )
-    ._().WriteBlackboard("llm_record")
+    ._()._().Function(decide_next_step)
     .End()
 )
 # fmt: on
@@ -72,6 +109,7 @@ tree = (
 
 async def main() -> None:
     blackboard = Blackboard(prompt="What's the weather in San Francisco?")
+    blackboard.messages.append({"role": "user", "content": blackboard.prompt})
     context = Context()
 
     async with context.using_blackboard(blackboard):
@@ -79,8 +117,7 @@ async def main() -> None:
 
     print("Result:", result)
     print("Record:", blackboard.llm_record)
-    if result.data:
-        print("Final output:", result.data.final_output)
+    print("Final output:", result.data)
 
     storage = FileTraceStorageHandler(".traces")
     trace_id = await storage.save(context.trace_root())
