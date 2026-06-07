@@ -463,38 +463,34 @@ tree = (
 
 ## Tool Call <span id="tool-call"></span> <a href="#ref">[↑]</a>
 
-`LLMNode` supports tool calls out of the box: when the LLM returns `tool_calls`, the node
-executes them via `tool_executor`, appends results to the conversation, and re-calls the LLM
-until the final answer is reached (up to `max_iterations`).
+`LLMNode` supports tool definitions out of the box: it sends `Tool` schemas to the model and
+returns requested `tool_calls` in `LLMRunRecord`. Execute requested tools in your tree or
+application loop, append `role="tool"` messages, then call an LLM node again.
 
 ```python
-from tinytasktree import JSON, ToolCall, ToolDef, ToolFunctionDef, Tree
+from tinytasktree import Context, JSON, Tool, Tree
 
-TOOLS = [
-    ToolDef(
-        type="function",
-        function=ToolFunctionDef(
-            name="get_weather",
-            description="Get the current weather in a given location",
-            parameters={"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]},
-        ),
-    ),
-]
+class WeatherTool(Tool[Blackboard]):
+    NAME = "get_weather"
+    DESCRIPTION = "Get the current weather in a given location"
+    SIGNATURES = ["get_weather(location: str) -> object"]
+    EXAMPLES = ['get_weather({"location": "Beijing"})']
+    SCHEMA = {"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]}
 
-def tool_executor(b: Blackboard, tool_call: ToolCall) -> JSON:
-    return {"location": "Beijing", "weather": "sunny", "temperature": 25}
+    async def execute(self, blackboard: Blackboard, arguments: JSON, context: Context, tracer) -> JSON:
+        return {"location": arguments["location"], "weather": "sunny", "temperature": 25}
 
 tree = (
     Tree[Blackboard]("WeatherApp")
     .Sequence()
-    ._().LLM(model, make_messages, tools=TOOLS, tool_executor=tool_executor, max_iterations=5)
-    ._().WriteBlackboard("weather_result")
+    ._().LLM(model, make_messages, tools=[WeatherTool()])
+    ._().WriteBlackboard("llm_record")
     .End()
 )
 ```
 
-`tool_executor` supports sync/async and `tools` accepts `ToolDef` dataclasses (or raw dicts).
-Streaming tool calls are also supported -- deltas are accumulated and executed after the stream completes.
+The LLM node returns an `LLMRunRecord` containing final text, full messages, and requested
+tool calls. Streaming tool call deltas are accumulated into the returned record.
 
 ### Composite Nodes <span id="composite-nodes"></span> <a href="#ref">[↑]</a>
 

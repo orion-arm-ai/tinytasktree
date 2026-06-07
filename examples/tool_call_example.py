@@ -1,7 +1,7 @@
 """Tool call example.
 
 Demonstrates LLM tool call support: the LLM can request tool execution,
-and the tool_executor handles the actual work. The LLM is called again
+and Tool subclasses handle the actual work. The LLM is called again
 with the tool results until it returns a final text response.
 """
 
@@ -13,58 +13,46 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/" + "..")
 
 from dataclasses import dataclass
 
-from tinytasktree import JSON, Context, FileTraceStorageHandler, LLMModel, LLMProvider, ToolCall, ToolDef, ToolFunctionDef, Tree
+from tinytasktree import JSON, Context, FileTraceStorageHandler, LLMModel, LLMProvider, Tool, Tree
 
 # Requirements:
 #   - LLM_BASE_URL and LLM_API_KEY set for your LLM service
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY")
 PROVIDER = LLMProvider(base_url=LLM_BASE_URL or "", api_key=LLM_API_KEY)
-MODEL = LLMModel("qwen/qwen3.6-plus", provider=PROVIDER, extra_body={"reasoning": {"enabled": False}})
+MODEL = LLMModel("deepseek-v4-flash", provider=PROVIDER, extra_body={"reasoning": {"enabled": False}})
 
 
 @dataclass
 class Blackboard:
     prompt: str
-    weather: JSON | None = None
+    llm_record: object | None = None
 
 
-# Define tools using dataclasses
-TOOLS = [
-    ToolDef(
-        type="function",
-        function=ToolFunctionDef(
-            name="get_weather",
-            description="Get the current weather in a given location",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "location": {
-                        "type": "string",
-                        "description": "The city and state, e.g. San Francisco, CA",
-                    },
-                },
-                "required": ["location"],
+class WeatherTool(Tool[Blackboard]):
+    NAME = "get_weather"
+    DESCRIPTION = "Get the current weather in a given location"
+    SIGNATURES = ["get_weather(location: str) -> object"]
+    EXAMPLES = ['get_weather({"location": "San Francisco, CA"})']
+    SCHEMA = {
+        "type": "object",
+        "properties": {
+            "location": {
+                "type": "string",
+                "description": "The city and state, e.g. San Francisco, CA",
             },
-        ),
-    ),
-]
+        },
+        "required": ["location"],
+    }
+
+    async def execute(self, blackboard: Blackboard, arguments: JSON, context: Context, tracer) -> JSON:
+        location = str(arguments.get("location") or "San Francisco")
+        print(f"Executing tool: {self.format_call(arguments)}")
+        return {"location": location, "weather": "sunny", "temperature": 25}
 
 
 def make_messages(b: Blackboard) -> list[JSON]:
     return [{"role": "user", "content": b.prompt}]
-
-
-def tool_executor(b: Blackboard, tool_call: ToolCall) -> JSON:
-    """Execute a tool call and return the result."""
-    tool_name = tool_call.function.name
-    tool_args = tool_call.function.arguments
-    print(f"Executing tool: {tool_name}({tool_args})")
-
-    # Simulate weather API call
-    if tool_name == "get_weather":
-        return {"location": "San Francisco", "weather": "sunny", "temperature": 25}
-    return {"error": f"unknown tool: {tool_name}"}
 
 
 # fmt: off
@@ -74,11 +62,9 @@ tree = (
     ._().LLM(
         MODEL,
         make_messages,
-        tools=TOOLS,
-        tool_executor=tool_executor,
-        max_iterations=5,
+        tools=[WeatherTool()],
     )
-    ._().WriteBlackboard("weather")
+    ._().WriteBlackboard("llm_record")
     .End()
 )
 # fmt: on
@@ -92,7 +78,9 @@ async def main() -> None:
         result = await tree(context)
 
     print("Result:", result)
-    print("Weather:", blackboard.weather)
+    print("Record:", blackboard.llm_record)
+    if result.data:
+        print("Final output:", result.data.final_output)
 
     storage = FileTraceStorageHandler(".traces")
     trace_id = await storage.save(context.trace_root())

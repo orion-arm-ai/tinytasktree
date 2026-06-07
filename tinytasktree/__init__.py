@@ -148,9 +148,11 @@ from typing import (
     AsyncGenerator,
     Awaitable,
     Callable,
+    ClassVar,
     Literal,
     Protocol,
     Self,
+    Sequence,
     Type,
     TypeVar,
     cast,
@@ -177,13 +179,13 @@ __all__ = (
     "JSON",
     "LLMModel",
     "LLMProvider",
+    "Tool",
     "ToolCall",
-    "ToolDef",
-    "ToolExecutor",
-    "ToolFactory",
-    "ToolItem",
+    "ExecutedToolCall",
+    "LLMToolFactory",
+    "LLMRecordCallback",
     "ToolFunction",
-    "ToolFunctionDef",
+    "LLMRunRecord",
     "JSONLoader",
     "Result",
     "Status",
@@ -634,6 +636,14 @@ class Context:
         """Return the tracer for the current node."""
         return self._trace_root._ensure_path(self._path)
 
+    def parent_tracer(self, depth: int = 1) -> Tracer:
+        """Return an ancestor tracer of the current node."""
+        if depth < 1:
+            raise TasktreeProgrammingError("parent_tracer depth must be >= 1")
+        if depth >= len(self._path):
+            return self._trace_root
+        return self._trace_root._ensure_path(self._path[:-depth])
+
     def current_path(self) -> list[str]:
         """Return the current node path."""
         return self._path
@@ -867,6 +877,10 @@ type Func09[B] = Callable[[B, Tracer], Any]  # function(blackboard, tracer) -> a
 type Func10[B] = Callable[[B, Tracer], Result]  # function(blackboard, tracer) -> result
 type Func11[B] = Callable[[B, Tracer], Awaitable[Any]]  # async function(blackboard, tracer) -> any
 type Func12[B] = Callable[[B, Tracer], Awaitable[Result]]  # async function(blackboard, tracer) -> result
+type Func13[B] = Callable[[B, Tracer, Context], Any]  # function(blackboard, tracer, context) -> any
+type Func14[B] = Callable[[B, Tracer, Context], Result]  # function(blackboard, tracer, context) -> result
+type Func15[B] = Callable[[B, Tracer, Context], Awaitable[Any]]  # async function(blackboard, tracer, context) -> any
+type Func16[B] = Callable[[B, Tracer, Context], Awaitable[Result]]  # async function(blackboard, tracer, context) -> result
 type Func[B] = (
     Func01
     | Func02
@@ -880,6 +894,10 @@ type Func[B] = (
     | Func10[B]
     | Func11[B]
     | Func12[B]
+    | Func13[B]
+    | Func14[B]
+    | Func15[B]
+    | Func16[B]
 )
 
 
@@ -899,7 +917,7 @@ class FunctionNode[B](LeafNode[B]):
     @override
     def OnBuildEnd(self) -> None:
         LeafNode.OnBuildEnd(self)
-        if self._func_param_cnt not in {0, 1, 2}:
+        if self._func_param_cnt not in {0, 1, 2, 3}:
             raise TasktreeProgrammingError(f"{self.fullname}:: invalid function params count")
 
     @override
@@ -915,6 +933,9 @@ class FunctionNode[B](LeafNode[B]):
             elif self._func_param_cnt == 2:
                 b = cast(B, context._current_blackboard())
                 d = await cast(Func11[B] | Func12[B], self._func)(b, tracer)
+            elif self._func_param_cnt == 3:
+                b = cast(B, context._current_blackboard())
+                d = await cast(Func15[B] | Func16[B], self._func)(b, tracer, context)
             else:
                 raise TasktreeProgrammingError("LeafNode: unsupported function type")
         else:
@@ -926,6 +947,9 @@ class FunctionNode[B](LeafNode[B]):
             elif self._func_param_cnt == 2:
                 b = cast(B, context._current_blackboard())
                 d = cast(Func09[B] | Func10[B], self._func)(b, tracer)
+            elif self._func_param_cnt == 3:
+                b = cast(B, context._current_blackboard())
+                d = cast(Func13[B] | Func14[B], self._func)(b, tracer, context)
             else:
                 raise TasktreeProgrammingError("LeafNode: unsupported function type")
         if isinstance(d, Result):
@@ -1306,54 +1330,93 @@ class ToolCall:
         )
 
 
-# [async] function(blackboard, tool_call) -> JSON result
-type ToolExecutor1[B] = Callable[[B, ToolCall], Awaitable[JSON]]
-type ToolExecutor2[B] = Callable[[B, ToolCall], JSON]
-type ToolExecutor[B] = ToolExecutor1[B] | ToolExecutor2[B]
-
-
-# tool def (OpenAI format) or factory function
 @dataclass
-class ToolFunctionDef:
-    name: str = ""
-    description: str = ""
-    parameters: dict[str, Any] = field(default_factory=dict)
+class ExecutedToolCall:
+    id: str
+    name: str
+    arguments: JSON
+    result: Any = None
+    ok: bool = True
+    error: str | None = None
+    iteration: int = 0
+    duration_ms: float = 0.0
+
+    def json(self) -> JSON:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "arguments": self.arguments,
+            "result": self.result,
+            "ok": self.ok,
+            "error": self.error,
+            "iteration": self.iteration,
+            "duration_ms": self.duration_ms,
+        }
 
 
 @dataclass
-class ToolDef:
-    type: str = "function"
-    function: ToolFunctionDef = field(default_factory=ToolFunctionDef)
+class LLMRunRecord:
+    input_messages: list[JSON]
+    messages: list[JSON]
+    tool_calls: list[ToolCall]
+    executed_tool_calls: list[ExecutedToolCall]
+    final_output: str = ""
+    finish_reason: str = ""
+    iterations: int = 0
 
-    def to_dict(self) -> JSON:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, data: Any) -> "ToolDef":
-        func_data = data.get("function", {}) if isinstance(data, dict) else {}
-        if isinstance(func_data, ToolFunctionDef):
-            func = func_data
-        elif isinstance(func_data, dict):
-            func = ToolFunctionDef(
-                name=func_data.get("name", ""),
-                description=func_data.get("description", ""),
-                parameters=func_data.get("parameters", {}),
-            )
-        else:
-            func = ToolFunctionDef()
-        return cls(
-            type=data.get("type", "function") if isinstance(data, dict) else "function",
-            function=func,
-        )
+    def json(self) -> JSON:
+        return {
+            "input_messages": self.input_messages,
+            "messages": self.messages,
+            "tool_calls": [tc.to_dict() for tc in self.tool_calls],
+            "executed_tool_calls": [tc.json() for tc in self.executed_tool_calls],
+            "final_output": self.final_output,
+            "finish_reason": self.finish_reason,
+            "iterations": self.iterations,
+        }
 
 
-type ToolItem = ToolDef | JSON
-type ToolFactory[B] = Callable[[B], list[ToolItem]]
+class Tool[B](ABC):
+    NAME: ClassVar[str]
+    SIGNATURES: ClassVar[Sequence[str]] = ()
+    EXAMPLES: ClassVar[Sequence[str]] = ()
+    DESCRIPTION: ClassVar[str] = ""
+    SCHEMA: ClassVar[dict[str, Any]] = {"type": "object", "properties": {}}
+
+    def openai_schema(self) -> JSON:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.NAME,
+                "description": self._full_description(),
+                "parameters": self.SCHEMA,
+            },
+        }
+
+    def format_call(self, arguments: JSON) -> str:
+        return f"{self.NAME}({_json_dumps(arguments, default=_json_default_serializer).decode()})"
+
+    @abstractmethod
+    async def execute(self, blackboard: B, arguments: JSON, context: Context, tracer: Tracer) -> Any:
+        raise NotImplementedError()
+
+    def _full_description(self) -> str:
+        parts = [self.DESCRIPTION.strip()]
+        if self.SIGNATURES:
+            parts.append("Signatures:\n" + "\n".join(str(x) for x in self.SIGNATURES))
+        if self.EXAMPLES:
+            parts.append("Examples:\n" + "\n".join(str(x) for x in self.EXAMPLES))
+        return "\n\n".join(part for part in parts if part)
+
+
+type LLMToolFactory[B] = Callable[[B], list[Tool[B]]]
+type LLMRecordCallback[B] = Callable[[B, LLMRunRecord, Tracer], Awaitable[None] | None]
 
 
 @dataclass
 class _LLMRuntimeConfig:
     model: str
+    input_messages: list[JSON]
     messages: list[JSON]
     stream: bool
     input_price_per_m: float
@@ -1363,7 +1426,7 @@ class _LLMRuntimeConfig:
     llm_call_kwargs: dict[str, Any]
     api_key: str | None
     base_url: str | None
-    tools: list[ToolItem] | None
+    tools: list[Tool[Any]] | None
 
 
 @dataclass
@@ -1372,6 +1435,8 @@ class _LLMExecutionState:
     finish_reason: str = ""
     last_tokens: dict[str, int] | None = None
     cost_reported: bool = False
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    executed_tool_calls: list[ExecutedToolCall] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -1591,9 +1656,8 @@ class LLMNode[B](LeafNode[B]):
         base_url: str | LLMBaseURLFactory[B] | None = None,
         client_kwargs: dict[str, Any] | None = None,
         extra_body: dict[str, Any] | None = None,
-        tools: list[ToolItem] | ToolFactory[B] | None = None,
-        tool_executor: ToolExecutor[B] | None = None,
-        max_iterations: int = 5,
+        tools: list[Tool[B]] | LLMToolFactory[B] | None = None,
+        on_llm_record: LLMRecordCallback[B] | None = None,
         **llm_call_kwargs,
     ) -> None:
         LeafNode.__init__(self, name)
@@ -1618,11 +1682,7 @@ class LLMNode[B](LeafNode[B]):
             self._base_url_params_cnt = _inspect_func_parameters_count(base_url)
         self._llm_call_kwargs = llm_call_kwargs
         self._tools = tools
-        self._tool_executor = tool_executor
-        self._max_iterations = max_iterations
-        self._is_tool_executor_async = False
-        if tool_executor:
-            self._is_tool_executor_async = inspect.iscoroutinefunction(tool_executor)
+        self._on_llm_record = on_llm_record
 
     def _try_record_cost(
         self,
@@ -1662,9 +1722,6 @@ class LLMNode[B](LeafNode[B]):
         if callable(self._base_url):
             if self._base_url_params_cnt != 1:
                 raise TasktreeProgrammingError(f"{self.fullname}: base_url factory params count invalid")
-        if self._max_iterations < 1:
-            raise TasktreeProgrammingError(f"{self.fullname}: max_iterations must be >= 1")
-
     async def _call_stream_delta_callback(
         self, b: B, full_output: str, delta_content: str, finished: bool, finish_reason: str
     ) -> None:
@@ -1684,49 +1741,70 @@ class LLMNode[B](LeafNode[B]):
                     func4 = cast(LLMStreamOnChunkCallback3[B], self._stream_on_delta)
                     func4(b, full_output, delta_content, finished, finish_reason)
 
-    async def _execute_tool_calls(
-        self,
-        b: B,
-        tool_calls: list[ToolCall],
-        tracer: Tracer,
-    ) -> list[JSON]:
-        """Execute tool calls and return results."""
-        results: list[JSON] = []
-        for tc in tool_calls:
-            tool_id = tc.id
-            tool_func = tc.function.name or "unknown"
-            tool_args = tc.function.arguments or "{}"
-            tracer.log(f"executing tool: {tool_func}({tool_args})")
-            if self._tool_executor:
-                if self._is_tool_executor_async:
-                    result = await cast(ToolExecutor1[B], self._tool_executor)(b, tc)
-                else:
-                    result = cast(ToolExecutor2[B], self._tool_executor)(b, tc)
-            else:
-                result = {"error": "no tool_executor provided"}
-            results.append(result)
-            tracer.update_attributes(tool_id=tool_id, tool_function=tool_func, tool_result=result)
-        return results
+    @staticmethod
+    def _clone_json_list(items: list[JSON]) -> list[JSON]:
+        return [cast(JSON, _json_loads(_json_dumps(item, default=_json_default_serializer))) for item in items]
 
-    def _tool_call_failure_result(
+    def _build_run_record(
         self,
         *,
-        tool_calls: list[ToolCall],
-        reason: str,
-        iteration: int,
-        output: str,
+        runtime: _LLMRuntimeConfig,
+        state: _LLMExecutionState,
+        iterations: int,
+    ) -> LLMRunRecord:
+        return LLMRunRecord(
+            input_messages=self._clone_json_list(runtime.input_messages),
+            messages=self._clone_json_list(runtime.messages),
+            tool_calls=list(state.tool_calls),
+            executed_tool_calls=list(state.executed_tool_calls),
+            final_output=state.output,
+            finish_reason=state.finish_reason,
+            iterations=iterations,
+        )
+
+    @staticmethod
+    def _append_assistant_message(messages: list[JSON], output: str, tool_calls: list[ToolCall]) -> None:
+        if not output and not tool_calls:
+            return
+        message: JSON = {"role": "assistant", "content": output if output else None}
+        if tool_calls:
+            message["tool_calls"] = [tc.to_dict() for tc in tool_calls]
+        if messages:
+            last = messages[-1]
+            if last == message:
+                return
+        messages.append(message)
+
+    async def _finish_with_record(
+        self,
+        *,
+        b: B,
         tracer: Tracer,
+        runtime: _LLMRuntimeConfig,
+        state: _LLMExecutionState,
+        iterations: int,
+        status: Status,
+        failure_reason: str | None = None,
     ) -> Result:
-        tracer.update_attributes(tool_calls=True, tool_call_failure=reason)
-        data: JSON = {
-            "reason": reason,
-            "tool_calls": [tc.to_dict() for tc in tool_calls],
-            "iteration": iteration,
-            "max_iterations": self._max_iterations,
-        }
-        if output:
-            data["content"] = output
-        return Result.FAIL(data)
+        if status == Status.OK:
+            self._append_assistant_message(runtime.messages, state.output, state.tool_calls)
+        record = self._build_run_record(runtime=runtime, state=state, iterations=iterations)
+        if failure_reason is not None:
+            tracer.update_attributes(tool_call_failure=failure_reason)
+        tracer.update_attributes(llm_record=record.json())
+        if record.tool_calls:
+            tracer.update_attributes(tool_calls=[tc.to_dict() for tc in record.tool_calls])
+        tracer.update_attributes(messages=record.messages)
+        callback = self._on_llm_record
+        if callback is not None:
+            try:
+                callback_result = callback(b, record, tracer)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+            except Exception as e:
+                tracer.error(e)
+                return Result.FAIL(record)
+        return Result(status, record)
 
     def _resolve_runtime_config(self, b: B, tracer: Tracer) -> _LLMRuntimeConfig:
         model_input = self._model(b) if callable(self._model) else self._model
@@ -1740,6 +1818,8 @@ class LLMNode[B](LeafNode[B]):
             model_llm_call_kwargs,
         ) = self._resolve_model_input(model_input)
         messages = self._messages(b) if callable(self._messages) else self._messages
+        input_messages = self._clone_json_list(list(messages))
+        runtime_messages = self._clone_json_list(list(messages))
         stream = self._stream(b) if callable(self._stream) else self._stream
         client_kwargs = self._merge_llm_call_kwargs(
             provider.client_kwargs if provider is not None else None,
@@ -1765,10 +1845,31 @@ class LLMNode[B](LeafNode[B]):
         tools = self._tools
         if callable(tools):
             tools = tools(b)
-        tracer.update_attributes(tools=tools is not None, max_iterations=self._max_iterations)
+        tool_list = list(tools) if tools is not None else None
+        tool_map: dict[str, Tool[Any]] = {}
+        if tool_list is not None:
+            for tool in tool_list:
+                if not tool.NAME:
+                    raise TasktreeProgrammingError(f"{self.fullname}: tool NAME must not be empty")
+                if tool.NAME in tool_map:
+                    raise TasktreeProgrammingError(f"{self.fullname}: duplicate tool name: {tool.NAME}")
+                tool_map[tool.NAME] = cast(Tool[Any], tool)
+        tracer.update_attributes(tools=tool_list is not None)
+        if tool_list is not None:
+            tracer.update_attributes(
+                available_tools=[
+                    {
+                        "name": tool.NAME,
+                        "description": tool.DESCRIPTION,
+                        "schema": tool.SCHEMA,
+                    }
+                    for tool in tool_list
+                ]
+            )
         return _LLMRuntimeConfig(
             model=model,
-            messages=list(messages),
+            input_messages=input_messages,
+            messages=runtime_messages,
             stream=stream,
             input_price_per_m=input_price_per_m,
             output_price_per_m=output_price_per_m,
@@ -1777,7 +1878,7 @@ class LLMNode[B](LeafNode[B]):
             llm_call_kwargs=llm_call_kwargs,
             api_key=api_key,
             base_url=base_url,
-            tools=tools,
+            tools=cast(list[Tool[Any]] | None, tool_list),
         )
 
     def _trace_request(self, tracer: Tracer, runtime: _LLMRuntimeConfig, client_kwargs: dict[str, Any]) -> None:
@@ -1820,7 +1921,7 @@ class LLMNode[B](LeafNode[B]):
             }
         )
         if runtime.tools is not None:
-            request_kwargs["tools"] = [t.to_dict() if isinstance(t, ToolDef) else t for t in runtime.tools]
+            request_kwargs["tools"] = [tool.openai_schema() for tool in runtime.tools]
         self._trace_request(tracer, runtime, client_kwargs)
         return client_kwargs, request_kwargs
 
@@ -1874,74 +1975,10 @@ class LLMNode[B](LeafNode[B]):
             else:
                 streamed_tool_calls.append(new_tc)
 
-    @staticmethod
-    def _append_tool_messages(
-        messages: list[JSON],
-        tool_calls: list[ToolCall],
-        assistant_output: str,
-        results: list[JSON],
-    ) -> None:
-        messages.append(
-            {
-                "role": "assistant",
-                "content": assistant_output if assistant_output else None,
-                "tool_calls": [tc.to_dict() for tc in tool_calls],
-            }
-        )
-        for tc, result in zip(tool_calls, results):
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": json.dumps(result),
-                }
-            )
-
-    async def _handle_tool_calls(
-        self,
-        *,
-        b: B,
-        tracer: Tracer,
-        runtime: _LLMRuntimeConfig,
-        state: _LLMExecutionState,
-        tool_calls: list[ToolCall],
-        iteration: int,
-    ) -> _LLMIterationOutcome:
-        tracer.update_attributes(tool_calls=True)
-        if self._tool_executor is None:
-            if runtime.stream:
-                await self._call_stream_delta_callback(b, state.output, "", True, state.finish_reason)
-            return _LLMIterationOutcome(
-                result=self._tool_call_failure_result(
-                    tool_calls=tool_calls,
-                    reason="tool_calls_without_executor",
-                    iteration=iteration,
-                    output=state.output,
-                    tracer=tracer,
-                )
-            )
-        if iteration >= self._max_iterations:
-            if runtime.stream:
-                await self._call_stream_delta_callback(b, state.output, "", True, state.finish_reason)
-            return _LLMIterationOutcome(
-                result=self._tool_call_failure_result(
-                    tool_calls=tool_calls,
-                    reason="max_iterations_reached",
-                    iteration=iteration,
-                    output=state.output,
-                    tracer=tracer,
-                )
-            )
-        tracer.log(f"received {len(tool_calls)} tool_calls")
-        results = await self._execute_tool_calls(b, tool_calls, tracer)
-        self._append_tool_messages(runtime.messages, tool_calls, state.output, results)
-        state.output = ""
-        state.cost_reported = False
-        return _LLMIterationOutcome(should_continue=True)
-
     async def _handle_stream_iteration(
         self,
         *,
+        context: Context,
         b: B,
         response: Any,
         tracer: Tracer,
@@ -1980,19 +2017,14 @@ class LLMNode[B](LeafNode[B]):
 
         state.finish_reason = iteration_finish_reason
         if streamed_tool_calls:
-            return await self._handle_tool_calls(
-                b=b,
-                tracer=tracer,
-                runtime=runtime,
-                state=state,
-                tool_calls=streamed_tool_calls,
-                iteration=iteration,
-            )
+            tracer.update_attributes(tool_calls=True)
+            state.tool_calls.extend(streamed_tool_calls)
         return _LLMIterationOutcome()
 
     async def _handle_nonstream_iteration(
         self,
         *,
+        context: Context,
         b: B,
         response: Any,
         tracer: Tracer,
@@ -2018,19 +2050,14 @@ class LLMNode[B](LeafNode[B]):
         )
         raw_tool_calls = self._obj_get(message, "tool_calls")
         if raw_tool_calls:
-            return await self._handle_tool_calls(
-                b=b,
-                tracer=tracer,
-                runtime=runtime,
-                state=state,
-                tool_calls=[ToolCall.from_dict(tc) for tc in raw_tool_calls],
-                iteration=iteration,
-            )
+            tracer.update_attributes(tool_calls=True)
+            state.tool_calls.extend([ToolCall.from_dict(tc) for tc in raw_tool_calls])
         return _LLMIterationOutcome()
 
     async def _run_iteration(
         self,
         *,
+        context: Context,
         b: B,
         tracer: Tracer,
         runtime: _LLMRuntimeConfig,
@@ -2043,6 +2070,7 @@ class LLMNode[B](LeafNode[B]):
             response = await client.chat.completions.create(**request_kwargs)
             if runtime.stream:
                 return await self._handle_stream_iteration(
+                    context=context,
                     b=b,
                     response=response,
                     tracer=tracer,
@@ -2051,6 +2079,7 @@ class LLMNode[B](LeafNode[B]):
                     iteration=iteration,
                 )
             return await self._handle_nonstream_iteration(
+                context=context,
                 b=b,
                 response=response,
                 tracer=tracer,
@@ -2065,12 +2094,14 @@ class LLMNode[B](LeafNode[B]):
         if runtime.stream:
             await self._call_stream_delta_callback(b, state.output, "", True, state.finish_reason)
 
-    def _finalize_execution(
+    async def _finalize_execution(
         self,
         *,
+        b: B,
         tracer: Tracer,
         runtime: _LLMRuntimeConfig,
         state: _LLMExecutionState,
+        iterations: int,
     ) -> Result:
         tracer.update_attributes(output=state.output)
         tracer.update_attributes(finish_reason=state.finish_reason)
@@ -2092,32 +2123,35 @@ class LLMNode[B](LeafNode[B]):
                 tracer.update_attributes(completion_tokens=state.last_tokens["completion"])
             if "total" in state.last_tokens:
                 tracer.update_attributes(total_tokens=state.last_tokens["total"])
-        return Result.OK(state.output)
+        return await self._finish_with_record(
+            b=b,
+            tracer=tracer,
+            runtime=runtime,
+            state=state,
+            iterations=iterations,
+            status=Status.OK,
+        )
 
     @override
     async def _impl(self, context: Context, tracer: Tracer) -> Result:
         b = cast(B, context._current_blackboard())
         runtime = self._resolve_runtime_config(b, tracer)
         state = _LLMExecutionState()
-
-        for iteration in range(1, self._max_iterations + 1):
-            state.last_tokens = None
-            tracer.update_attributes(iteration=iteration)
-            outcome = await self._run_iteration(
-                b=b,
-                tracer=tracer,
-                runtime=runtime,
-                state=state,
-                iteration=iteration,
-            )
-            if outcome.result is not None:
-                return outcome.result
-            if outcome.should_continue:
-                continue
-            break
+        state.last_tokens = None
+        tracer.update_attributes(iteration=1)
+        outcome = await self._run_iteration(
+            context=context,
+            b=b,
+            tracer=tracer,
+            runtime=runtime,
+            state=state,
+            iteration=1,
+        )
+        if outcome.result is not None:
+            return outcome.result
 
         await self._finish_streaming_if_needed(b, runtime, state)
-        return self._finalize_execution(tracer=tracer, runtime=runtime, state=state)
+        return await self._finalize_execution(b=b, tracer=tracer, runtime=runtime, state=state, iterations=1)
 
 
 ############################
@@ -3159,9 +3193,8 @@ class Tree[B](_ForwardingChildNode[B]):
         base_url: str | LLMBaseURLFactory[B] | None = None,
         client_kwargs: dict[str, Any] | None = None,
         extra_body: dict[str, Any] | None = None,
-        tools: list[ToolItem] | ToolFactory[B] | None = None,
-        tool_executor: ToolExecutor[B] | None = None,
-        max_iterations: int = 5,
+        tools: list[Tool[B]] | LLMToolFactory[B] | None = None,
+        on_llm_record: LLMRecordCallback[B] | None = None,
         **llm_call_kwargs,
     ) -> Self:
         """
@@ -3170,7 +3203,7 @@ class Tree[B](_ForwardingChildNode[B]):
         Uses `openai-python` chat completions under the hood.
 
         - Status: Returns `OK` upon successful completion.
-        - Data: Returns the final output text: `OK(output_text)`.
+        - Data: Returns an `LLMRunRecord` with final text, messages, and tool executions.
 
         :param model: Model name string, `LLMModel`, or a factory function
             `f(blackboard) -> str | LLMModel`.
@@ -3195,16 +3228,12 @@ class Tree[B](_ForwardingChildNode[B]):
         :param name: Optional name for the node.
         :param llm_call_kwargs: Extra keyword arguments forwarded to
             `AsyncOpenAI().chat.completions.create(...)`.
-        :param tools: Optional list of tool definitions (OpenAI format) or a factory
-            function `f(blackboard) -> list[tool_def]`. Tools are passed to the API
-            so the LLM can request tool execution.
-        :param tool_executor: A function `f(blackboard, tool_call) -> JSON` (sync or async)
-            that executes tool calls returned by the LLM. If provided and the LLM
-            returns `tool_calls`, this node will automatically call the executor,
-            append results to the conversation, and re-call the LLM (up to
-            `max_iterations` times).
-        :param max_iterations: Maximum number of LLM call iterations for tool use.
-            Default is 5.
+        :param tools: Optional list of `Tool` instances or a factory function
+            `f(blackboard) -> list[Tool]`. Tools are passed to the API so the
+            model can request tool calls. The LLM node itself performs exactly
+            one model call; execute requested tools in your tree/application loop.
+        :param on_llm_record: Optional sync/async callback
+            `f(blackboard, record, tracer)` called once with the complete run record.
 
         Example::
 
@@ -3229,8 +3258,7 @@ class Tree[B](_ForwardingChildNode[B]):
                 client_kwargs,
                 extra_body,
                 tools,
-                tool_executor,
-                max_iterations,
+                on_llm_record,
                 **llm_call_kwargs,
             )
         )

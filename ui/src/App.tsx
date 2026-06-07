@@ -219,6 +219,25 @@ type StackIndex = {
     rowMap: Map<string, StackRow>;
 };
 
+type ExecutedToolCallJson = {
+    id?: string;
+    name?: string;
+    arguments?: unknown;
+    result?: unknown;
+    ok?: boolean;
+    error?: string | null;
+    iteration?: number;
+    duration_ms?: number;
+    phase?: "requested" | "executed";
+};
+
+type ChatMessageJson = {
+    role?: string;
+    content?: unknown;
+    tool_calls?: unknown[];
+    tool_call_id?: string;
+};
+
 type NodeTone = {
     label: string;
     className: string;
@@ -455,6 +474,126 @@ function extractResultData(raw: unknown): string {
         return trimmed;
     }
     return String(raw);
+}
+
+function parseJsonValue(raw: unknown): unknown {
+    if (typeof raw !== "string") return raw;
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed === "None") return null;
+    try {
+        return JSON.parse(trimmed);
+    } catch {
+        return null;
+    }
+}
+
+function getResultData(raw: unknown): unknown {
+    const parsed = parseJsonValue(raw);
+    if (parsed && typeof parsed === "object" && "data" in parsed) {
+        return (parsed as { data?: unknown }).data;
+    }
+    return parsed;
+}
+
+function stringifyPretty(value: unknown): string {
+    if (value == null) return "";
+    if (typeof value === "string") {
+        const parsed = parseJsonValue(value);
+        if (parsed != null) return JSON.stringify(parsed, null, 2);
+        return value;
+    }
+    return JSON.stringify(value, null, 2);
+}
+
+function toolCallToDisplay(toolCall: unknown): ExecutedToolCallJson | null {
+    if (!toolCall || typeof toolCall !== "object") return null;
+    const obj = toolCall as { id?: string; function?: { name?: string; arguments?: unknown } };
+    const rawArguments = obj.function?.arguments;
+    return {
+        id: obj.id,
+        name: obj.function?.name,
+        arguments: parseJsonValue(rawArguments) ?? rawArguments,
+        ok: undefined,
+        phase: "requested",
+    };
+}
+
+function collectRequestedToolCalls(record: unknown): ExecutedToolCallJson[] {
+    if (!record || typeof record !== "object") return [];
+    const obj = record as { tool_calls?: unknown; messages?: unknown };
+    const rows: ExecutedToolCallJson[] = [];
+    if (Array.isArray(obj.tool_calls)) {
+        obj.tool_calls.forEach((toolCall) => {
+            const row = toolCallToDisplay(toolCall);
+            if (row) rows.push(row);
+        });
+    }
+    if (Array.isArray(obj.messages)) {
+        obj.messages.forEach((message) => {
+            if (!message || typeof message !== "object") return;
+            const toolCalls = (message as { tool_calls?: unknown }).tool_calls;
+            if (!Array.isArray(toolCalls)) return;
+            toolCalls.forEach((toolCall) => {
+                const row = toolCallToDisplay(toolCall);
+                if (row) rows.push(row);
+            });
+        });
+    }
+    return rows;
+}
+
+function mergeToolRows(rows: ExecutedToolCallJson[]): ExecutedToolCallJson[] {
+    const seen = new Set<string>();
+    const result: ExecutedToolCallJson[] = [];
+    rows.forEach((row) => {
+        const key = `${row.phase || "executed"}:${row.id || ""}:${row.name || ""}:${JSON.stringify(row.arguments ?? null)}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        result.push(row);
+    });
+    return result;
+}
+
+function toolExecutionsFromTrace(node: TraceNodeJson | null): ExecutedToolCallJson[] {
+    if (!node) return [];
+    const rows: ExecutedToolCallJson[] = [];
+    const direct = parseJsonValue(node.attributes?.tool_executions);
+    if (Array.isArray(direct)) {
+        rows.push(...(direct as ExecutedToolCallJson[]).map((row) => ({ ...row, phase: "executed" as const })));
+    }
+
+    const attrRecord = parseJsonValue(node.attributes?.llm_record);
+    if (attrRecord && typeof attrRecord === "object") {
+        const executions = (attrRecord as { executed_tool_calls?: unknown }).executed_tool_calls;
+        if (Array.isArray(executions)) {
+            rows.push(...(executions as ExecutedToolCallJson[]).map((row) => ({ ...row, phase: "executed" as const })));
+        }
+        rows.push(...collectRequestedToolCalls(attrRecord));
+    }
+
+    const resultData = getResultData(node.result);
+    const resultRecord = parseJsonValue(resultData);
+    if (resultRecord && typeof resultRecord === "object") {
+        const executions = (resultRecord as { executed_tool_calls?: unknown }).executed_tool_calls;
+        if (Array.isArray(executions)) {
+            rows.push(...(executions as ExecutedToolCallJson[]).map((row) => ({ ...row, phase: "executed" as const })));
+        }
+        rows.push(...collectRequestedToolCalls(resultRecord));
+    }
+    return mergeToolRows(rows);
+}
+
+function chatTranscriptFromTrace(node: TraceNodeJson | null): ChatMessageJson[] {
+    if (!node) return [];
+    const direct = parseJsonValue(node.attributes?.chat_transcript);
+    if (Array.isArray(direct)) return direct as ChatMessageJson[];
+    return [];
+}
+
+function chatMessageText(message: ChatMessageJson): string {
+    if (message.content == null) return "";
+    if (typeof message.content === "string") return message.content;
+    return stringifyPretty(message.content);
 }
 
 function shouldFoldChildren(node: TraceNodeJson): boolean {
@@ -867,7 +1006,7 @@ function TraceUI() {
     const [stackLeafOnly, setStackLeafOnly] = useState(false);
     const [loadError, setLoadError] = useState<string | null>(null);
     const [selectedId, setSelectedId] = useState<string | null>(null);
-    const [tab, setTab] = useState<"result" | "logs" | "attributes">("result");
+    const [tab, setTab] = useState<"result" | "chat" | "tools" | "logs" | "attributes">("result");
     const initialLeftWidth = useMemo(() => {
         if (typeof window === "undefined") return 640;
         return Math.min(MAX_LEFT_WIDTH, Math.max(MIN_LEFT_WIDTH, Math.floor(window.innerWidth * 0.65)));
@@ -1118,6 +1257,8 @@ function TraceUI() {
         if (!selectedTrace?.result) return "";
         return extractResultData(selectedTrace.result);
     }, [selectedTrace]);
+    const selectedToolExecutions = useMemo(() => toolExecutionsFromTrace(selectedTrace), [selectedTrace]);
+    const selectedChatTranscript = useMemo(() => chatTranscriptFromTrace(selectedTrace), [selectedTrace]);
 
     useEffect(() => {
         if (!flowInstance || nodes.length === 0) return;
@@ -1449,6 +1590,152 @@ function TraceUI() {
                 ),
             },
             {
+                key: "chat",
+                label: `Chat(${selectedChatTranscript.length})`,
+                children: (
+                    <Card
+                        size="small"
+                        className="panel-section"
+                        extra={
+                            <Button
+                                size="small"
+                                onClick={() => copyText(JSON.stringify(selectedChatTranscript, null, 2))}
+                            >
+                                Copy
+                            </Button>
+                        }
+                    >
+                        {selectedChatTranscript.length ? (
+                            <div className="chat-transcript">
+                                {selectedChatTranscript.map((message, index) => {
+                                    const role = message.role || "unknown";
+                                    const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+                                    const toolContent = role === "tool" ? parseJsonValue(message.content) : null;
+                                    return (
+                                        <div key={`${role}-${index}`} className={`chat-message ${role}`}>
+                                            <div className="chat-message-head">
+                                                <Tag color={role === "user" ? "blue" : role === "assistant" ? "green" : role === "tool" ? "purple" : "default"}>
+                                                    {role}
+                                                </Tag>
+                                                {message.tool_call_id && <Text type="secondary">{message.tool_call_id}</Text>}
+                                            </div>
+                                            {chatMessageText(message) && role !== "tool" && (
+                                                <pre className="chat-message-content">{highlightContent(chatMessageText(message))}</pre>
+                                            )}
+                                            {toolCalls.length > 0 && (
+                                                <div className="chat-tool-calls">
+                                                    <Text type="secondary">Tool calls</Text>
+                                                    {toolCalls.map((toolCall, idx) => (
+                                                        <pre key={idx} className="chat-message-content compact">
+                                                            {stringifyPretty(toolCall)}
+                                                        </pre>
+                                                    ))}
+                                                </div>
+                                            )}
+                                            {role === "tool" && (
+                                                <div className="chat-tool-calls">
+                                                    <Text type="secondary">Tool result</Text>
+                                                    <pre className="chat-message-content compact">
+                                                        {stringifyPretty(toolContent ?? message.content)}
+                                                    </pre>
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        ) : (
+                            <pre className="panel-content">(empty)</pre>
+                        )}
+                    </Card>
+                ),
+            },
+            {
+                key: "tools",
+                label: `Tool Calls(${selectedToolExecutions.length})`,
+                children: (
+                    <Card
+                        size="small"
+                        className="panel-section"
+                        extra={
+                            <Button
+                                size="small"
+                                onClick={() => copyText(JSON.stringify(selectedToolExecutions, null, 2))}
+                            >
+                                Copy
+                            </Button>
+                        }
+                    >
+                        <Table
+                            size="small"
+                            pagination={false}
+                            rowKey="_rowKey"
+                            dataSource={selectedToolExecutions.map((item, index) => ({
+                                ...item,
+                                _rowKey: `${item.id || "tool"}-${item.iteration || 0}-${index}`,
+                            }))}
+                            columns={[
+                                {
+                                    title: "Tool",
+                                    dataIndex: "name",
+                                    key: "name",
+                                    width: 160,
+                                    render: (value: string, row: ExecutedToolCallJson) => (
+                                        <Space direction="vertical" size={2}>
+                                            <Text code>{value || "(unknown)"}</Text>
+                                            <Text type="secondary">iter {row.iteration ?? "-"}</Text>
+                                        </Space>
+                                    ),
+                                },
+                                {
+                                    title: "Status",
+                                    dataIndex: "ok",
+                                    key: "ok",
+                                    width: 118,
+                                    render: (ok: boolean | undefined, row: ExecutedToolCallJson) => {
+                                        if (row.phase === "requested") return <Tag color="blue">REQUESTED</Tag>;
+                                        return <Tag color={ok === false ? "red" : "green"}>{ok === false ? "FAIL" : "OK"}</Tag>;
+                                    },
+                                },
+                                {
+                                    title: "Duration",
+                                    dataIndex: "duration_ms",
+                                    key: "duration_ms",
+                                    width: 110,
+                                    render: (value: number | undefined) =>
+                                        typeof value === "number" ? `${value.toFixed(2)} ms` : "-",
+                                },
+                                {
+                                    title: "Arguments / Result",
+                                    key: "details",
+                                    render: (_: unknown, row: ExecutedToolCallJson) => (
+                                        <div className="tool-call-details">
+                                            <Text type="secondary">Arguments</Text>
+                                            <pre className="panel-content tool-call-pre">
+                                                {stringifyPretty(row.arguments) || "(empty)"}
+                                            </pre>
+                                            <Text type="secondary">
+                                                {row.phase === "requested" ? "Result" : row.ok === false ? "Error" : "Result"}
+                                            </Text>
+                                            <pre className="panel-content tool-call-pre">
+                                                {row.phase === "requested"
+                                                    ? "(pending in this node)"
+                                                    : row.ok === false
+                                                    ? row.error || stringifyPretty(row.result) || "(empty)"
+                                                    : stringifyPretty(row.result) || "(empty)"}
+                                            </pre>
+                                        </div>
+                                    ),
+                                },
+                            ]}
+                            scroll={{ x: 760 }}
+                            className="attrs-table"
+                            locale={{ emptyText: "(empty)" }}
+                        />
+                    </Card>
+                ),
+            },
+            {
                 key: "logs",
                 label: `Logs(${selectedTrace?.logs ? selectedTrace.logs.length : 0})`,
                 children: (
@@ -1527,7 +1814,7 @@ function TraceUI() {
                 ),
             },
         ],
-        [selectedTrace, resultText, highlightContent]
+        [selectedTrace, resultText, highlightContent, selectedToolExecutions, selectedChatTranscript]
     );
 
     return (
@@ -1963,7 +2250,7 @@ function TraceUI() {
                             <Tabs
                                 className="tabs"
                                 activeKey={tab}
-                                onChange={(key) => setTab(key as "result" | "logs" | "attributes")}
+                                onChange={(key) => setTab(key as "result" | "chat" | "tools" | "logs" | "attributes")}
                                 items={detailsTabs}
                             />
 
