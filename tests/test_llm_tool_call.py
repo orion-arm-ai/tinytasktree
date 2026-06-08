@@ -13,6 +13,7 @@ class Blackboard:
     prompt: str
     messages: list[tinytasktree.JSON] = field(default_factory=list)
     done: bool = False
+    enable_weather: bool = True
     tool_names: list[str] = field(default_factory=list)
     memory: dict[str, str] = field(default_factory=dict)
 
@@ -61,6 +62,26 @@ class SaveMemoryTool(tinytasktree.Tool[Blackboard]):
         blackboard.tool_names.append(self.NAME)
         blackboard.memory[str(arguments["key"])] = str(arguments["value"])
         return {"saved": True, "total": len(blackboard.memory)}
+
+
+class FailingTool(tinytasktree.Tool[Blackboard]):
+    NAME = "fail_tool"
+    DESCRIPTION = "Always fails."
+    SCHEMA = {
+        "type": "object",
+        "properties": {"reason": {"type": "string"}},
+        "required": ["reason"],
+    }
+
+    async def execute(
+        self,
+        blackboard: Blackboard,
+        arguments: tinytasktree.JSON,
+        context: tinytasktree.Context,
+        tracer: tinytasktree.Tracer,
+    ) -> tinytasktree.JSON:
+        blackboard.tool_names.append(self.NAME)
+        raise RuntimeError(f"failed: {arguments['reason']}")
 
 
 def make_messages(b: Blackboard) -> list[tinytasktree.JSON]:
@@ -422,3 +443,311 @@ async def test_llm_streaming_tool_call_deltas_are_merged_and_executed(mock_opena
     assert record.tool_results[0].ok is True
     assert blackboard.tool_names == ["get_weather"]
     assert stream_events[-1] == ("", "", True, "tool_calls")
+
+
+async def test_llm_dynamic_tools_factory_uses_blackboard_state(mock_openai):
+    recorded_tool_names: list[list[str]] = []
+
+    async def handler(**kwargs):
+        recorded_tool_names.append([tool["function"]["name"] for tool in kwargs["tools"]])
+        if kwargs["tools"]:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_weather",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_weather",
+                                        "arguments": '{"city": "Paris"}',
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+                "_hidden_params": {"response_cost": 0.0},
+            }
+        return {
+            "choices": [{"message": {"content": "No tools enabled."}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+            "_hidden_params": {"response_cost": 0.0},
+        }
+
+    def make_tools(b: Blackboard) -> list[tinytasktree.Tool[Blackboard]]:
+        return [WeatherTool()] if b.enable_weather else []
+
+    mock_openai(handler=handler)
+    tree = (
+        tinytasktree.Tree[Blackboard]("DynamicTools")
+        .Sequence()
+        ._()
+        .LLM("mock/dynamic-tools", make_messages, tools=make_tools)
+        .End()
+    )
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="Weather?", enable_weather=True)
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert result.is_ok()
+    assert blackboard.tool_names == ["get_weather"]
+    assert recorded_tool_names[-1] == ["get_weather"]
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="Weather?", enable_weather=False)
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert result.is_ok()
+    assert result.data.final_output == "No tools enabled."
+    assert blackboard.tool_names == []
+    assert recorded_tool_names[-1] == []
+
+
+async def test_llm_async_on_llm_message_is_called_for_each_emitted_message(mock_openai):
+    async def handler(**kwargs):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": "I will save and check weather.",
+                        "tool_calls": [
+                            {
+                                "id": "call_memory",
+                                "type": "function",
+                                "function": {
+                                    "name": "save_memory",
+                                    "arguments": '{"key": "city", "value": "Paris"}',
+                                },
+                            },
+                            {
+                                "id": "call_weather",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "arguments": '{"city": "Paris"}',
+                                },
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18},
+            "_hidden_params": {"response_cost": 0.0},
+        }
+
+    mock_openai(handler=handler)
+    emitted_roles: list[str] = []
+
+    async def on_llm_message(b: Blackboard, message: tinytasktree.JSON, tracer: tinytasktree.Tracer) -> None:
+        emitted_roles.append(str(message["role"]))
+        b.messages.append(message)
+
+    tree = (
+        tinytasktree.Tree[Blackboard]("AsyncLLMMessage")
+        .Sequence()
+        ._()
+        .LLM(
+            "mock/async-message",
+            make_messages,
+            tools=[SaveMemoryTool(), WeatherTool()],
+            on_llm_message=on_llm_message,
+        )
+        .End()
+    )
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="Remember Paris and get weather.")
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert result.is_ok()
+    assert emitted_roles == ["assistant", "tool", "tool"]
+    assert [message["role"] for message in blackboard.messages] == ["assistant", "tool", "tool"]
+    assert [tool_result.name for tool_result in result.data.tool_results] == ["save_memory", "get_weather"]
+
+
+async def test_llm_tool_execution_exception_becomes_failed_tool_message(mock_openai):
+    async def handler(**kwargs):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_fail",
+                                "type": "function",
+                                "function": {
+                                    "name": "fail_tool",
+                                    "arguments": '{"reason": "boom"}',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+            "_hidden_params": {"response_cost": 0.0},
+        }
+
+    mock_openai(handler=handler)
+    tree = (
+        tinytasktree.Tree[Blackboard]("FailingToolCall")
+        .Sequence()
+        ._()
+        .LLM("mock/failing-tool", make_messages, tools=[FailingTool()])
+        .End()
+    )
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="Call failing tool")
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert result.is_ok()
+    record = result.data
+    assert blackboard.tool_names == ["fail_tool"]
+    assert record.tool_results[0].ok is False
+    assert record.tool_results[0].error == "failed: boom"
+    tool_content = json.loads(record.emitted_messages[1]["content"])
+    assert tool_content["ok"] is False
+    assert tool_content["code"] == "tool_execution_error"
+
+
+async def test_llm_invalid_tool_arguments_becomes_failed_tool_message(mock_openai):
+    async def handler(**kwargs):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_weather",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "arguments": '["Paris"]',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+            "_hidden_params": {"response_cost": 0.0},
+        }
+
+    mock_openai(handler=handler)
+    tree = (
+        tinytasktree.Tree[Blackboard]("InvalidToolArguments")
+        .Sequence()
+        ._()
+        .LLM("mock/invalid-tool-arguments", make_messages, tools=[WeatherTool()])
+        .End()
+    )
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="Call weather with invalid args")
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert result.is_ok()
+    record = result.data
+    assert blackboard.tool_names == []
+    assert record.tool_results[0].ok is False
+    assert record.tool_results[0].arguments == {}
+    assert record.tool_results[0].error == "tool arguments must be a JSON object"
+    tool_content = json.loads(record.emitted_messages[1]["content"])
+    assert tool_content["code"] == "tool_execution_error"
+
+
+async def test_llm_streaming_multiple_tool_call_deltas_are_merged_by_index(mock_openai):
+    async def handler(**kwargs):
+        async def gen():
+            yield {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_memory",
+                                    "type": "function",
+                                    "function": {"name": "save_memory", "arguments": '{"key": '},
+                                },
+                                {
+                                    "index": 1,
+                                    "id": "call_weather",
+                                    "type": "function",
+                                    "function": {"name": "get_weather", "arguments": '{"city": '},
+                                },
+                            ]
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+            }
+            yield {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": '"city", "value": "Paris"}'},
+                                },
+                                {
+                                    "index": 1,
+                                    "function": {"arguments": '"Paris"}'},
+                                },
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9},
+            }
+
+        return gen()
+
+    mock_openai(handler=handler)
+    tree = (
+        tinytasktree.Tree[Blackboard]("StreamingMultipleToolCalls")
+        .Sequence()
+        ._()
+        .LLM(
+            "mock/stream-multi-tool",
+            make_messages,
+            stream=True,
+            tools=[SaveMemoryTool(), WeatherTool()],
+        )
+        .End()
+    )
+
+    context = tinytasktree.Context()
+    blackboard = Blackboard(prompt="Remember Paris and get weather.")
+    async with context.using_blackboard(blackboard):
+        result = await tree(context)
+
+    assert result.is_ok()
+    record = result.data
+    assert [tool_call.function.name for tool_call in record.tool_calls] == ["save_memory", "get_weather"]
+    assert [tool_call.function.arguments for tool_call in record.tool_calls] == [
+        '{"key": "city", "value": "Paris"}',
+        '{"city": "Paris"}',
+    ]
+    assert [tool_result.name for tool_result in record.tool_results] == ["save_memory", "get_weather"]
+    assert blackboard.memory == {"city": "Paris"}
+    assert blackboard.tool_names == ["save_memory", "get_weather"]
