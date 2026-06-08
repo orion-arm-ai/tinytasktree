@@ -589,6 +589,14 @@ function chatTranscriptFromTrace(node: TraceNodeJson | null): ChatMessageJson[] 
     return [];
 }
 
+function hasChatTrace(node: TraceNodeJson | null): boolean {
+    if (!node) return false;
+    const marked = parseJsonValue(node.attributes?.has_chat);
+    if (marked === true) return true;
+    if (typeof marked === "string" && ["true", "1", "yes"].includes(marked.trim().toLowerCase())) return true;
+    return chatTranscriptFromTrace(node).length > 0;
+}
+
 function chatMessageText(message: ChatMessageJson): string {
     if (message.content == null) return "";
     if (typeof message.content === "string") return message.content;
@@ -929,6 +937,7 @@ function TraceCard(props: NodeProps<TraceNodeData>) {
     const foldedPrefix = data.isFolded ? "▸ " : "";
     const tokenUsage = data.node.kind === "LLM" ? tokenUsageFromAttributes(data.node.attributes) : null;
     const tokenLine = formatTokenUsage(tokenUsage);
+    const hasChat = hasChatTrace(data.node);
 
     return (
         <div
@@ -954,6 +963,11 @@ function TraceCard(props: NodeProps<TraceNodeData>) {
             <Tag color={statusColor(status)} className="trace-status">
                 {status}
             </Tag>
+            {hasChat && (
+                <Tag color="geekblue" className="trace-chat-marker">
+                    CHAT
+                </Tag>
+            )}
             <div className="trace-card-meta">Duration: {data.durationMs.toFixed(2)} ms</div>
             <div className="trace-card-meta">Cost: {formatCost(data.cost)}</div>
             {tokenLine && <div className="trace-card-meta">{tokenLine}</div>}
@@ -1671,7 +1685,7 @@ function TraceUI() {
                             rowKey="_rowKey"
                             dataSource={selectedToolExecutions.map((item, index) => ({
                                 ...item,
-                                _rowKey: `${item.id || "tool"}-${item.iteration || 0}-${index}`,
+                                _rowKey: `${item.id || "tool"}-${item.name || "call"}-${index}`,
                             }))}
                             columns={[
                                 {
@@ -1680,10 +1694,7 @@ function TraceUI() {
                                     key: "name",
                                     width: 160,
                                     render: (value: string, row: ToolCallDisplayJson) => (
-                                        <Space direction="vertical" size={2}>
-                                            <Text code>{value || "(unknown)"}</Text>
-                                            <Text type="secondary">iter {row.iteration ?? "-"}</Text>
-                                        </Space>
+                                        <Text code>{value || "(unknown)"}</Text>
                                     ),
                                 },
                                 {
@@ -2051,6 +2062,7 @@ function TraceUI() {
                                         const isFolded = isTreeStackMode && activeFoldIds.has(row.id);
                                         const inSelectedPath = selectedPathIds.includes(row.id);
                                         const tokenLine = row.node.kind === "LLM" ? formatTokenUsage(tokenUsageFromAttributes(row.node.attributes)) : "";
+                                        const hasChat = hasChatTrace(row.node);
                                         const tone = getNodeTone(row.node.kind);
                                         const KindIcon = tone.icon;
                                         const subtreeBackground =
@@ -2110,6 +2122,7 @@ function TraceUI() {
                                                             </span>
                                                             <span className="stack-name">{row.node.name || "(unnamed)"}</span>
                                                             <span className={`stack-status stack-status-${row.status.toLowerCase()}`}>{row.status}</span>
+                                                            {hasChat && <span className="stack-chat-marker">CHAT</span>}
                                                         </div>
                                                         {!compactMode && tokenLine && <div className="stack-subline">{tokenLine}</div>}
                                                     </div>

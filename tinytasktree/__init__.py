@@ -350,6 +350,10 @@ class TraceNode:
 
     def update_attributes(self, **kwargs) -> None:
         self.attributes.update(kwargs)
+        chat_transcript = kwargs.get("chat_transcript")
+        if isinstance(chat_transcript, list):
+            self.attributes["has_chat"] = True
+            self.attributes["chat_messages_count"] = len(chat_transcript)
 
     def log(self, msg: str, level: TraceLevel = "info") -> None:
         self.logs.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S") + f" [{level}] : " + msg)
