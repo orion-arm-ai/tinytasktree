@@ -87,7 +87,7 @@ def mock_openai(monkeypatch):
 
     configure.state = state  # type: ignore[attr-defined]
 
-    monkeypatch.setattr(tinytasktree, "_new_async_openai_client", fake_new_async_openai_client)
+    monkeypatch.setattr(tinytasktree.LLMNode, "_new_async_openai_client", staticmethod(fake_new_async_openai_client))
     return configure
 
 

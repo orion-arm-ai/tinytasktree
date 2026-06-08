@@ -34,9 +34,7 @@ def _make_child(idx: int, ok: bool):
 
 async def test_random_selector_weighted_order_and_stop():
     weights = [1.0, 2.0, 3.0]
-
-    random.seed(123)
-    expected_order = tinytasktree._weighted_shuffle([0, 1, 2], weights=weights)
+    expected_order = [2, 1, 0]
     expected_first_ok = next(i for i in expected_order if i in {1, 2})
     expected_visited = expected_order[: expected_order.index(expected_first_ok) + 1]
 

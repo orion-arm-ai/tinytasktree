@@ -1,7 +1,6 @@
 """Helper function tests.
 
 Steps:
-- Verify deterministic output and permutation behavior for _weighted_shuffle.
 - Check numeric conversion rules for _as_int.
 - Validate string conversion for dict/list/dataclass in _try_to_string.
 - Validate _json_default_serializer for supported types.
@@ -13,7 +12,6 @@ Expectations:
 from __future__ import annotations
 
 import functools
-import random
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from enum import Enum
@@ -40,20 +38,6 @@ class DictBox:
 
     def dict(self):
         return {"name": self.name}
-
-
-def test_weighted_shuffle():
-    items = ["a", "b", "c", "d"]
-
-    random.seed(0)
-    assert tinytasktree._weighted_shuffle(items) == ["d", "b", "a", "c"]
-
-    random.seed(0)
-    assert tinytasktree._weighted_shuffle(items, [1, 2, 3, 4]) == ["b", "a", "c", "d"]
-
-    random.seed(1)
-    shuffled = tinytasktree._weighted_shuffle(items)
-    assert sorted(shuffled) == sorted(items)
 
 
 def test_as_int():

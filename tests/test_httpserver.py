@@ -31,16 +31,14 @@ def _request(server: http.server.ThreadingHTTPServer, method: str, path: str) ->
         conn.close()
 
 
-def test_httpserver_serves_ui_root_assets_and_spa_fallback(monkeypatch, tmp_path: Path):
+def test_httpserver_serves_ui_root_assets_and_spa_fallback(tmp_path: Path):
     ui_root = tmp_path / "ui_dist"
     assets_dir = ui_root / "assets"
     assets_dir.mkdir(parents=True)
     (ui_root / "index.html").write_text("<html><body>tinytasktree ui</body></html>", encoding="utf-8")
     (assets_dir / "app.js").write_text("console.log('ui');", encoding="utf-8")
 
-    monkeypatch.setattr(tinytasktree, "_find_bundled_ui_root", lambda: ui_root)
-
-    handler = tinytasktree.create_http_app(str(tmp_path / "traces"))
+    handler = tinytasktree.create_http_app(str(tmp_path / "traces"), ui_root=ui_root)
     server, thread = _serve(handler)
     try:
         status, content_type, body = _request(server, "GET", "/")
@@ -73,13 +71,12 @@ class Blackboard:
     value: str = ""
 
 
-def test_httpserver_trace_route_still_wins_over_ui_fallback(monkeypatch, tmp_path: Path):
+def test_httpserver_trace_route_still_wins_over_ui_fallback(tmp_path: Path):
     ui_root = tmp_path / "ui_dist"
     ui_root.mkdir(parents=True)
     (ui_root / "index.html").write_text("<html><body>tinytasktree ui</body></html>", encoding="utf-8")
 
     traces_dir = tmp_path / "traces"
-    monkeypatch.setattr(tinytasktree, "_find_bundled_ui_root", lambda: ui_root)
 
     # fmt: off
     tree = (
@@ -100,7 +97,7 @@ def test_httpserver_trace_route_still_wins_over_ui_fallback(monkeypatch, tmp_pat
 
     trace_id = asyncio.run(_run_tree_and_save_trace())
 
-    handler = tinytasktree.create_http_app(str(traces_dir))
+    handler = tinytasktree.create_http_app(str(traces_dir), ui_root=ui_root)
     server, thread = _serve(handler)
     try:
         status, content_type, body = _request(server, "GET", f"/trace/{trace_id}")
@@ -114,14 +111,12 @@ def test_httpserver_trace_route_still_wins_over_ui_fallback(monkeypatch, tmp_pat
         thread.join()
 
 
-def test_httpserver_trace_route_rejects_invalid_trace_ids(monkeypatch, tmp_path: Path):
+def test_httpserver_trace_route_rejects_invalid_trace_ids(tmp_path: Path):
     ui_root = tmp_path / "ui_dist"
     ui_root.mkdir(parents=True)
     (ui_root / "index.html").write_text("<html><body>tinytasktree ui</body></html>", encoding="utf-8")
 
-    monkeypatch.setattr(tinytasktree, "_find_bundled_ui_root", lambda: ui_root)
-
-    handler = tinytasktree.create_http_app(str(tmp_path / "traces"))
+    handler = tinytasktree.create_http_app(str(tmp_path / "traces"), ui_root=ui_root)
     server, thread = _serve(handler)
     try:
         status, content_type, body = _request(server, "GET", "/trace/../secret")
@@ -134,13 +129,12 @@ def test_httpserver_trace_route_rejects_invalid_trace_ids(monkeypatch, tmp_path:
         thread.join()
 
 
-def test_httpserver_lists_traces_desc(monkeypatch, tmp_path: Path):
+def test_httpserver_lists_traces_desc(tmp_path: Path):
     ui_root = tmp_path / "ui_dist"
     ui_root.mkdir(parents=True)
     (ui_root / "index.html").write_text("<html><body>tinytasktree ui</body></html>", encoding="utf-8")
 
     traces_dir = tmp_path / "traces"
-    monkeypatch.setattr(tinytasktree, "_find_bundled_ui_root", lambda: ui_root)
 
     # fmt: off
     tree_a = (
@@ -168,7 +162,7 @@ def test_httpserver_lists_traces_desc(monkeypatch, tmp_path: Path):
     trace_id_a = asyncio.run(_run_and_save(tree_a))
     trace_id_b = asyncio.run(_run_and_save(tree_b))
 
-    handler = tinytasktree.create_http_app(str(traces_dir))
+    handler = tinytasktree.create_http_app(str(traces_dir), ui_root=ui_root)
     server, thread = _serve(handler)
     try:
         status, content_type, body = _request(server, "GET", "/traces")
@@ -188,15 +182,13 @@ def test_httpserver_limits_trace_list_to_recent_100(monkeypatch, tmp_path: Path)
     ui_root.mkdir(parents=True)
     (ui_root / "index.html").write_text("<html><body>tinytasktree ui</body></html>", encoding="utf-8")
 
-    monkeypatch.setattr(tinytasktree, "_find_bundled_ui_root", lambda: ui_root)
-
     async def _fake_list_traces(self, limit: int | None = None):
         assert limit == 100
         return [{"id": f"trace-{i}", "name": f"Trace {i}", "created_at": "2026-04-18T00:00:00"} for i in range(100)]
 
     monkeypatch.setattr(tinytasktree.FileTraceStorageHandler, "list_traces", _fake_list_traces)
 
-    handler = tinytasktree.create_http_app(str(tmp_path / "traces"))
+    handler = tinytasktree.create_http_app(str(tmp_path / "traces"), ui_root=ui_root)
     server, thread = _serve(handler)
     try:
         status, content_type, body = _request(server, "GET", "/traces")

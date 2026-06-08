@@ -367,6 +367,27 @@ class TraceNode:
     def total_cost(self) -> float:
         return self.cost + sum([ch.total_cost() for ch in self.children.values()])
 
+    @staticmethod
+    def _merge_token_fields(
+        target: dict[str, int],
+        prompt: int | None,
+        completion: int | None,
+        total: int | None,
+    ) -> None:
+        if prompt is not None:
+            target["prompt"] = prompt
+        if completion is not None:
+            target["completion"] = completion
+        if total is not None:
+            target["total"] = total
+
+    @staticmethod
+    def _add_token_totals(total: dict[str, int], tokens: dict[str, int] | None) -> None:
+        if not tokens:
+            return
+        for key, value in tokens.items():
+            total[key] = total.get(key, 0) + int(value)
+
     def _node_tokens(self) -> dict[str, int] | None:
         tokens_value = self.attributes.get("tokens")
         tokens: dict[str, int] = {}
@@ -377,7 +398,7 @@ class TraceNode:
             total = _as_int(tokens_value.get("total"))
             if total is None and prompt is not None and completion is not None:
                 total = prompt + completion
-            _merge_token_fields(tokens, prompt, completion, total)
+            self._merge_token_fields(tokens, prompt, completion, total)
         elif isinstance(tokens_value, str) and tokens_value:
             try:
                 parsed = _json_loads(tokens_value)
@@ -387,7 +408,7 @@ class TraceNode:
                     total = _as_int(parsed.get("total"))
                     if total is None and prompt is not None and completion is not None:
                         total = prompt + completion
-                    _merge_token_fields(tokens, prompt, completion, total)
+                    self._merge_token_fields(tokens, prompt, completion, total)
             except Exception:
                 pass
 
@@ -397,15 +418,15 @@ class TraceNode:
             total = _as_int(self.attributes.get("total_tokens") or self.attributes.get("total"))
             if total is None and prompt is not None and completion is not None:
                 total = prompt + completion
-            _merge_token_fields(tokens, prompt, completion, total)
+            self._merge_token_fields(tokens, prompt, completion, total)
 
         return tokens or None
 
     def total_tokens(self) -> dict[str, int]:
         total: dict[str, int] = {}
-        _add_token_totals(total, self._node_tokens())
+        self._add_token_totals(total, self._node_tokens())
         for child in self.children.values():
-            _add_token_totals(total, child.total_tokens())
+            self._add_token_totals(total, child.total_tokens())
         return total
 
 
@@ -1073,12 +1094,11 @@ type ConditionFunction = (
     | ConditionFunction6
 )
 
-
-def _check_attr_from_blackboard[B](b: B, attr: str) -> bool:
-    return bool(getattr(b, attr))
-
-
 class _ConditionFunctionHandler_Mixin[B](Node[B]):
+    @staticmethod
+    def _check_attr_from_blackboard(b: B, attr: str) -> bool:
+        return bool(getattr(b, attr))
+
     def __init__(self, attr_or_condition_func: str | ConditionFunction) -> None:
         condition: ConditionFunction
         name: str = ""
@@ -1086,7 +1106,7 @@ class _ConditionFunctionHandler_Mixin[B](Node[B]):
             condition = attr_or_condition_func
             name = _normalized_func_name(condition)
         else:
-            condition = functools.partial(_check_attr_from_blackboard, attr=attr_or_condition_func)
+            condition = functools.partial(self._check_attr_from_blackboard, attr=attr_or_condition_func)
             name = f"b.{attr_or_condition_func}"
 
         self._rewrited_name = name
@@ -1441,22 +1461,23 @@ class _LLMExecutionState:
     tool_results: list[ToolResult] = field(default_factory=list)
     emitted_messages: list[JSON] = field(default_factory=list)
 
-def _new_async_openai_client(**kwargs: Any) -> AsyncOpenAI:
-    return AsyncOpenAI(**kwargs)
-
-
-async def _close_openai_client(client: Any) -> None:
-    close = getattr(client, "close", None)
-    if not callable(close):
-        return
-    result = close()
-    if inspect.isawaitable(result):
-        await result
-
 
 @final
 class LLMNode[B](LeafNode[B]):
     KIND: str = "LLM"
+
+    @staticmethod
+    def _new_async_openai_client(**kwargs: Any) -> AsyncOpenAI:
+        return AsyncOpenAI(**kwargs)
+
+    @staticmethod
+    async def _close_openai_client(client: Any) -> None:
+        close = getattr(client, "close", None)
+        if not callable(close):
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
 
     @staticmethod
     def _obj_get(obj: Any, key: str, default: Any = None) -> Any:
@@ -1586,6 +1607,37 @@ class LLMNode[B](LeafNode[B]):
             if source:
                 merged.update(source)
         return merged
+
+    def _resolve_runtime_tools(self, b: B) -> list[Tool[Any]] | None:
+        tools = self._tools
+        if callable(tools):
+            tools = tools(b)
+        tool_list = list(tools) if tools is not None else None
+        tool_names: set[str] = set()
+        if tool_list is not None:
+            for tool in tool_list:
+                if not tool.NAME:
+                    raise TasktreeProgrammingError(f"{self.fullname}: tool NAME must not be empty")
+                if tool.NAME in tool_names:
+                    raise TasktreeProgrammingError(f"{self.fullname}: duplicate tool name: {tool.NAME}")
+                tool_names.add(tool.NAME)
+        return cast(list[Tool[Any]] | None, tool_list)
+
+    @staticmethod
+    def _trace_available_tools(tracer: Tracer, tools: list[Tool[Any]] | None) -> None:
+        tracer.update_attributes(tools=tools is not None)
+        if tools is None:
+            return
+        tracer.update_attributes(
+            available_tools=[
+                {
+                    "name": tool.NAME,
+                    "description": tool.DESCRIPTION,
+                    "schema": tool.SCHEMA,
+                }
+                for tool in tools
+            ]
+        )
 
     @staticmethod
     def _resolve_model_input(
@@ -1804,6 +1856,64 @@ class LLMNode[B](LeafNode[B]):
             raise ValueError("tool arguments must be a JSON object")
         return cast(JSON, arguments)
 
+    @staticmethod
+    def _tool_message(tool_call: ToolCall, content: JSON) -> JSON:
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "name": tool_call.function.name,
+            "content": _json_dumps(content, default=_json_default_serializer).decode(),
+        }
+
+    def _make_tool_success(
+        self,
+        tool: Tool[Any],
+        tool_call: ToolCall,
+        arguments: JSON,
+        result: Any,
+        duration_ms: float,
+    ) -> tuple[ToolResult, JSON]:
+        tool_result = ToolResult(
+            id=tool_call.id,
+            name=tool_call.function.name,
+            arguments=arguments,
+            result=result,
+            ok=True,
+            duration_ms=duration_ms,
+        )
+        content: JSON = {
+            "ok": True,
+            "executed": tool.format_call(arguments),
+            "result": result,
+            "duration_ms": duration_ms,
+        }
+        return tool_result, self._tool_message(tool_call, content)
+
+    def _make_tool_error(
+        self,
+        tool_call: ToolCall,
+        arguments: JSON,
+        error: str,
+        code: str,
+        duration_ms: float,
+    ) -> tuple[ToolResult, JSON]:
+        tool_result = ToolResult(
+            id=tool_call.id,
+            name=tool_call.function.name,
+            arguments=arguments,
+            ok=False,
+            error=error,
+            duration_ms=duration_ms,
+        )
+        content: JSON = {
+            "ok": False,
+            "executed": f"{tool_call.function.name}({tool_call.function.arguments or '{}'})",
+            "error": error,
+            "code": code,
+            "duration_ms": duration_ms,
+        }
+        return tool_result, self._tool_message(tool_call, content)
+
     async def _execute_tool_call(
         self,
         *,
@@ -1820,59 +1930,14 @@ class LLMNode[B](LeafNode[B]):
             arguments = self._parse_tool_arguments(tool_call)
             tool = tools_by_name[name]
             result = await tool.execute(b, arguments, context, tracer)
-            tool_result = ToolResult(
-                id=tool_call.id,
-                name=name,
-                arguments=arguments,
-                result=result,
-                ok=True,
-                duration_ms=(asyncio.get_running_loop().time() - started) * 1000,
-            )
-            content: JSON = {
-                "ok": True,
-                "executed": tool.format_call(arguments),
-                "result": result,
-                "duration_ms": tool_result.duration_ms,
-            }
+            duration_ms = (asyncio.get_running_loop().time() - started) * 1000
+            return self._make_tool_success(tool, tool_call, arguments, result, duration_ms)
         except KeyError:
-            tool_result = ToolResult(
-                id=tool_call.id,
-                name=name,
-                arguments=arguments,
-                ok=False,
-                error=f"unknown tool: {name}",
-                duration_ms=(asyncio.get_running_loop().time() - started) * 1000,
-            )
-            content = {
-                "ok": False,
-                "executed": f"{name}({tool_call.function.arguments or '{}'})",
-                "error": tool_result.error,
-                "code": "tool_not_found",
-                "duration_ms": tool_result.duration_ms,
-            }
+            duration_ms = (asyncio.get_running_loop().time() - started) * 1000
+            return self._make_tool_error(tool_call, arguments, f"unknown tool: {name}", "tool_not_found", duration_ms)
         except Exception as e:
-            tool_result = ToolResult(
-                id=tool_call.id,
-                name=name,
-                arguments=arguments,
-                ok=False,
-                error=str(e),
-                duration_ms=(asyncio.get_running_loop().time() - started) * 1000,
-            )
-            content = {
-                "ok": False,
-                "executed": f"{name}({tool_call.function.arguments or '{}'})",
-                "error": tool_result.error,
-                "code": "tool_execution_error",
-                "duration_ms": tool_result.duration_ms,
-            }
-        message: JSON = {
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "name": name,
-            "content": _json_dumps(content, default=_json_default_serializer).decode(),
-        }
-        return tool_result, message
+            duration_ms = (asyncio.get_running_loop().time() - started) * 1000
+            return self._make_tool_error(tool_call, arguments, str(e), "tool_execution_error", duration_ms)
 
     async def _execute_tool_calls(
         self,
@@ -1968,30 +2033,8 @@ class LLMNode[B](LeafNode[B]):
         base_url = self._resolve_base_url(b)
         if base_url is None and provider is not None:
             base_url = provider.base_url
-        tools = self._tools
-        if callable(tools):
-            tools = tools(b)
-        tool_list = list(tools) if tools is not None else None
-        tool_names: set[str] = set()
-        if tool_list is not None:
-            for tool in tool_list:
-                if not tool.NAME:
-                    raise TasktreeProgrammingError(f"{self.fullname}: tool NAME must not be empty")
-                if tool.NAME in tool_names:
-                    raise TasktreeProgrammingError(f"{self.fullname}: duplicate tool name: {tool.NAME}")
-                tool_names.add(tool.NAME)
-        tracer.update_attributes(tools=tool_list is not None)
-        if tool_list is not None:
-            tracer.update_attributes(
-                available_tools=[
-                    {
-                        "name": tool.NAME,
-                        "description": tool.DESCRIPTION,
-                        "schema": tool.SCHEMA,
-                    }
-                    for tool in tool_list
-                ]
-            )
+        tool_list = self._resolve_runtime_tools(b)
+        self._trace_available_tools(tracer, tool_list)
         return _LLMRuntimeConfig(
             model=model,
             input_messages=input_messages,
@@ -2004,7 +2047,7 @@ class LLMNode[B](LeafNode[B]):
             llm_call_kwargs=llm_call_kwargs,
             api_key=api_key,
             base_url=base_url,
-            tools=cast(list[Tool[Any]] | None, tool_list),
+            tools=tool_list,
         )
 
     def _trace_request(self, tracer: Tracer, runtime: _LLMRuntimeConfig, client_kwargs: dict[str, Any]) -> None:
@@ -2182,7 +2225,7 @@ class LLMNode[B](LeafNode[B]):
         state: _LLMExecutionState,
     ) -> None:
         client_kwargs, request_kwargs = self._prepare_request(runtime, tracer)
-        client = _new_async_openai_client(**client_kwargs)
+        client = self._new_async_openai_client(**client_kwargs)
         try:
             response = await client.chat.completions.create(**request_kwargs)
             if runtime.stream:
@@ -2201,7 +2244,7 @@ class LLMNode[B](LeafNode[B]):
                 state=state,
             )
         finally:
-            await _close_openai_client(client)
+            await self._close_openai_client(client)
 
     async def _finalize_execution(
         self,
@@ -2356,6 +2399,13 @@ type RandomWeightsFactory[B] = Callable[[B], list[float]]
 class RandomSelectorNode[B](CompositeNode[B]):
     KIND = "RandomSelector"
 
+    @staticmethod
+    def _weighted_shuffle[T](items: list[T], weights: list[float] | None = None) -> list[T]:
+        if weights is None:
+            return random.sample(items, len(items))
+        keys = [random.random() ** (1.0 / w) for w in weights]
+        return [x for _, x in sorted(zip(keys, items), reverse=True)]
+
     def __init__(
         self,
         children: list[Node[B]] | None = None,
@@ -2386,7 +2436,7 @@ class RandomSelectorNode[B](CompositeNode[B]):
             if any(w <= 0 for w in weights):
                 raise TasktreeProgrammingError(f"{self.fullname}: weights must be positive")
 
-        shuffled = _weighted_shuffle(list(enumerate(self._children)), weights=weights)
+        shuffled = self._weighted_shuffle(list(enumerate(self._children)), weights=weights)
         tracer.log("shuffled children order: {}".format([x[0] for x in shuffled]))
 
         for index, child in shuffled:
@@ -2828,6 +2878,50 @@ class CacherNode[B](SingleChildNode[B], DecoratorNode[B]):
             return cast(CacherValueValidator2[B], self._value_validator)(b, tracer)
         return ""  # won't happen
 
+    async def _read_cached_result(self, key: str, validation: str, tracer: Tracer) -> Result | None:
+        assert self._store
+        payload = await self._store.get(key)
+        if not payload:
+            tracer.update_attributes(cache_status="miss", cache_hit=False)
+            tracer.log(f"cache miss, key: {key}")
+            return None
+
+        try:
+            cached = pickle.loads(payload)
+            if self._value_validator:
+                if cached["validation"] == validation:
+                    tracer.update_attributes(cache_status="hit", cache_hit=True)
+                    tracer.log(f"cache hit, key: {key}, validation: {validation}")
+                    return Result.OK(cached["value"])
+                tracer.update_attributes(
+                    cache_status="invalidated",
+                    cache_hit=False,
+                    cache_validation_stored=cached["validation"],
+                )
+                tracer.log(
+                    "cache key found, but validation value changed: "
+                    + cached["validation"]
+                    + f"(expect: {validation})=> deleting key {key}"
+                )
+                await self._store.delete(key)
+                return None
+
+            tracer.update_attributes(cache_status="hit", cache_hit=True)
+            tracer.log(f"cache hit, key: {key}")
+            return Result.OK(cached["value"])
+        except Exception as e:
+            tracer.update_attributes(cache_status="decode_error", cache_hit=False)
+            tracer.error(f"{e} => miss")
+            return None
+
+    async def _write_cached_result(self, key: str, validation: str, result: Result, tracer: Tracer) -> None:
+        assert self._store
+        expires_in = self._compute_ex()
+        payload = pickle.dumps({"value": result.data, "validation": validation})
+        await self._store.set(key, payload, ex=expires_in)
+        tracer.update_attributes(cache_written=True, cache_expires_in_secs=int(expires_in.total_seconds()))
+        tracer.log(f"cache set (on ok), ex: {int(expires_in.total_seconds())}s, validation: {validation}")
+
     @override
     async def _impl(self, context: Context, tracer: Tracer) -> Result:
         assert self._store
@@ -2841,40 +2935,9 @@ class CacherNode[B](SingleChildNode[B], DecoratorNode[B]):
             tracer.update_attributes(cache_validation=validation)
 
         if enabled:
-            w = await self._store.get(k)
-            if w:
-                try:
-                    x = pickle.loads(w)
-                    if self._value_validator:  # Need validation
-                        if x["validation"] == validation:
-                            # Succeeds only if key exists and validation pass.
-                            tracer.update_attributes(cache_status="hit", cache_hit=True)
-                            tracer.log(f"cache hit, key: {k}, validation: {validation}")
-                            return Result.OK(x["value"])
-                        else:
-                            tracer.update_attributes(
-                                cache_status="invalidated",
-                                cache_hit=False,
-                                cache_validation_stored=x["validation"],
-                            )
-                            tracer.log(
-                                "cache key found, but validation value changed: "
-                                + x["validation"]
-                                + f"(expect: {validation})=> deleting key {k}"
-                            )
-                            await self._store.delete(k)
-                    else:
-                        # No validation, directly returns the cached value
-                        tracer.update_attributes(cache_status="hit", cache_hit=True)
-                        tracer.log(f"cache hit, key: {k}")
-                        return Result.OK(x["value"])
-                except Exception as e:
-                    # (KeyError, pickle.UnpicklingError)
-                    tracer.update_attributes(cache_status="decode_error", cache_hit=False)
-                    tracer.error(f"{e} => miss")
-            else:
-                tracer.update_attributes(cache_status="miss", cache_hit=False)
-                tracer.log(f"cache miss, key: {k}")
+            cached_result = await self._read_cached_result(k, validation, tracer)
+            if cached_result is not None:
+                return cached_result
         else:
             tracer.update_attributes(cache_status="disabled", cache_hit=False)
             tracer.log("cache disabled")
@@ -2884,12 +2947,7 @@ class CacherNode[B](SingleChildNode[B], DecoratorNode[B]):
 
         if enabled and result.is_ok():
             # Sets cache only if child runs successfully.
-            ex = self._compute_ex()
-            x1 = {"value": result.data, "validation": validation}
-            w = pickle.dumps(x1)
-            await self._store.set(k, w, ex=ex)
-            tracer.update_attributes(cache_written=True, cache_expires_in_secs=int(ex.total_seconds()))
-            tracer.log(f"cache set (on ok), ex: {int(ex.total_seconds())}s, validation: {validation}")
+            await self._write_cached_result(k, validation, result, tracer)
         return result
 
 
@@ -3999,22 +4057,6 @@ def _as_float(value: Any) -> float | None:
     return num
 
 
-def _merge_token_fields(target: dict[str, int], prompt: int | None, completion: int | None, total: int | None) -> None:
-    if prompt is not None:
-        target["prompt"] = prompt
-    if completion is not None:
-        target["completion"] = completion
-    if total is not None:
-        target["total"] = total
-
-
-def _add_token_totals(total: dict[str, int], tokens: dict[str, int] | None) -> None:
-    if not tokens:
-        return
-    for key, value in tokens.items():
-        total[key] = total.get(key, 0) + int(value)
-
-
 def _normalized_func_name(func: Callable) -> str:
     if isinstance(func, functools.partial):
         name = getattr(func.func, "__name__", func.func.__class__.__name__)
@@ -4028,13 +4070,6 @@ def _normalized_func_name(func: Callable) -> str:
 
 def _format_exception(e: BaseException) -> str:
     return f"{e.__class__.__name__}: {str(e)}"
-
-
-def _weighted_shuffle[T](items: list[T], weights: list[float] | None = None) -> list[T]:
-    if weights is None:
-        return random.sample(items, len(items))
-    keys = [random.random() ** (1.0 / w) for w in weights]
-    return [x for _, x in sorted(zip(keys, items), reverse=True)]
 
 
 class ThreadLocalProxy[T]:
@@ -4133,49 +4168,47 @@ def _json_dumps(
     ).encode("utf-8")
 
 
-def _find_bundled_ui_root() -> Any | None:
-    try:
-        ui_root = importlib.resources.files("tinytasktree").joinpath("ui_dist")
-        if ui_root.joinpath("index.html").is_file():
-            return ui_root
-    except Exception:
-        pass
-
-    local_ui_root = Path(__file__).resolve().parents[1].joinpath("ui", "dist")
-    if local_ui_root.joinpath("index.html").is_file():
-        return local_ui_root
-    return None
-
-
-def _resolve_ui_file(ui_root: Any, request_path: str) -> tuple[Any, str] | None:
-    normalized = request_path.lstrip("/") or "index.html"
-    parts = [part for part in PurePosixPath(normalized).parts if part not in {"", "."}]
-    if any(part == ".." for part in parts):
-        return None
-
-    candidate = ui_root.joinpath(*parts) if parts else ui_root.joinpath("index.html")
-    if candidate.is_file():
-        content_type = mimetypes.guess_type(str(PurePosixPath(*parts)) if parts else "index.html")[0]
-        return candidate, content_type or "application/octet-stream"
-
-    if parts and any("." in part for part in parts):
-        return None
-
-    index_file = ui_root.joinpath("index.html")
-    if index_file.is_file():
-        return index_file, "text/html; charset=utf-8"
-    return None
-
-
 ################
 # httpserver
 ################
 
 
-def create_http_app(trace_dir: str = ".traces") -> Any:
+def create_http_app(trace_dir: str = ".traces", ui_root: Any | None = None) -> Any:
+    def find_bundled_ui_root() -> Any | None:
+        try:
+            root = importlib.resources.files("tinytasktree").joinpath("ui_dist")
+            if root.joinpath("index.html").is_file():
+                return root
+        except Exception:
+            pass
+
+        local_root = Path(__file__).resolve().parents[1].joinpath("ui", "dist")
+        if local_root.joinpath("index.html").is_file():
+            return local_root
+        return None
+
+    def resolve_ui_file(root: Any, request_path: str) -> tuple[Any, str] | None:
+        normalized = request_path.lstrip("/") or "index.html"
+        parts = [part for part in PurePosixPath(normalized).parts if part not in {"", "."}]
+        if any(part == ".." for part in parts):
+            return None
+
+        candidate = root.joinpath(*parts) if parts else root.joinpath("index.html")
+        if candidate.is_file():
+            content_type = mimetypes.guess_type(str(PurePosixPath(*parts)) if parts else "index.html")[0]
+            return candidate, content_type or "application/octet-stream"
+
+        if parts and any("." in part for part in parts):
+            return None
+
+        index_file = root.joinpath("index.html")
+        if index_file.is_file():
+            return index_file, "text/html; charset=utf-8"
+        return None
+
     trace_list_limit = 100
     storage = FileTraceStorageHandler(trace_dir)
-    ui_root = _find_bundled_ui_root()
+    resolved_ui_root = ui_root if ui_root is not None else find_bundled_ui_root()
 
     class TasktreeHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -4220,10 +4253,10 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
             self._send_json(HTTPStatus.OK, cast(JSON, payload))
 
         def _handle_ui(self, path: str) -> bool:
-            if ui_root is None:
+            if resolved_ui_root is None:
                 return False
 
-            resolved = _resolve_ui_file(ui_root, path)
+            resolved = resolve_ui_file(resolved_ui_root, path)
             if resolved is None:
                 return False
 
@@ -4236,7 +4269,7 @@ def create_http_app(trace_dir: str = ".traces") -> Any:
             self.wfile.write(body)
             return True
 
-    TasktreeHTTPRequestHandler._ui_root = ui_root  # type: ignore[attr-defined]
+    TasktreeHTTPRequestHandler._ui_root = resolved_ui_root  # type: ignore[attr-defined]
     return TasktreeHTTPRequestHandler
 
 
