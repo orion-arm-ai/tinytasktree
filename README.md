@@ -23,46 +23,65 @@ tree = (
 )
 ```
 
-## LLM Example
+## LLM Tool Call Example
 
 ```python
+import os
 from dataclasses import dataclass
-from tinytasktree import Context, JSON, LLMModel, LLMProvider, Tree
+
+from tinytasktree import Context, JSON, Result, Tool, Tracer, Tree
 
 @dataclass
 class Blackboard:
-    prompt: str
-    response: str = ""
+    messages: list[JSON]
+    done: bool = False
 
 
 def make_messages(b: Blackboard) -> list[JSON]:
-    return [{"role": "user", "content": b.prompt}]
+    system = {"role": "system", "content": "Use tools when useful, then answer with the tool result."}
+    return [system, *b.messages]
 
 
-provider = LLMProvider(base_url="https://llm.example/v1", api_key="...")
-model = LLMModel(
-    "gpt-4.1-mini",
-    provider=provider,
-    input_price_per_m=0.15,
-    output_price_per_m=0.60,
-)
+class WeatherTool(Tool[Blackboard]):
+    NAME = "get_weather"
+    DESCRIPTION = "Get mock weather for a city."
+    SCHEMA = {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
+
+    async def execute(self, blackboard: Blackboard, arguments: JSON, context: Context, tracer: Tracer) -> JSON:
+        return {"city": arguments["city"], "condition": "sunny", "temperature_c": 25}
+
+
+def store_llm_message(b: Blackboard, message: JSON, tracer: Tracer) -> None:
+    b.messages.append(message)
+
+
+async def decide_next_step(b: Blackboard, _tracer: Tracer, context: Context) -> Result:
+    record = context._last_result.data
+    b.done = not bool(record.tool_calls)
+    return Result.OK(record.final_output if b.done else None)
+
+
+api_key = os.getenv("LLM_API_KEY")
+base_url = os.getenv("LLM_BASE_URL") or ""
+extra_body = {"reasoning": {"enabled": False}}
 
 tree = (
-    Tree[Blackboard]("HelloWorld")
-    .Sequence()
-    ._().LLM(model, make_messages)
-    ._().WriteBlackboard("response")
+    Tree[Blackboard]("WeatherAgent")
+    .While(lambda b: not b.done, max_loop_times=4)
+    ._().Sequence()
+    ._()._().LLM("deepseek-v4-flash", make_messages, api_key=api_key, base_url=base_url, extra_body=extra_body, tools=[WeatherTool()], on_llm_message=store_llm_message)
+    ._()._().Function(decide_next_step)
     .End()
 )
 
 async def main():
+    blackboard = Blackboard(messages=[{"role": "user", "content": "How is the weather in Tokyo?"}])
     context = Context()
-    blackboard = Blackboard(prompt="Say hello in JSON.")
     async with context.using_blackboard(blackboard):
         result = await tree(context)
 
-    print(result)
-    print(blackboard.response)
+    print(result.data)
+    print(blackboard.messages)
 ```
 
 ## Requirements
@@ -493,6 +512,24 @@ The LLM node returns an `LLMRunRecord` containing final text, full messages, emi
 assistant/tool messages, requested tool calls, and tool results. Streaming tool call deltas
 are accumulated before execution. Use `on_llm_message` to persist each emitted message as it
 is produced.
+
+Trace chat view:
+
+```python
+async def decide_next_step(b: Blackboard, tracer: Tracer, context: Context) -> Result:
+    record = context._last_result.data
+    b.done = not bool(record.tool_calls)
+
+    # Mark the current node and the outer loop with a full chat transcript.
+    tracer.update_attributes(chat_transcript=b.messages)
+    context.parent_tracer(2).update_attributes(chat_transcript=b.messages)
+
+    return Result.OK(record.final_output if b.done else None)
+```
+
+When `chat_transcript` is a list of messages, trace nodes are marked with `has_chat=True`;
+the trace UI can then show the node as a chat-capable step and render user, assistant,
+assistant tool call, and tool result messages together.
 
 ### Composite Nodes <span id="composite-nodes"></span> <a href="#ref">[↑]</a>
 
